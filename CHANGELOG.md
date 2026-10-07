@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.1 - 2026-10-06
+
+- Made AntiRaidHeli independent of the server-wide `patrolhelicopterai.flee_damage_percentage` convar.
+- Added a per-entity retirement guard that prevents only active AntiRaidHeli aircraft from fleeing at low health, without changing the server convar or affecting vanilla and other plugin helicopters.
+- Preserved intentional plugin retirement for raid inactivity and cleanup by explicitly allowing aircraft already registered for controlled retirement.
+- Prevented a naturally fleeing event helicopter from eventually disappearing and being misclassified as destroyed, which could incorrectly advance the response chain.
+
 ## 0.6.0 - 2026-10-06
 
 - Added persistent controlled-test activation: `/antiraidhelistart` enables automatic raid protection until an administrator disables it, including across reloads and restarts.

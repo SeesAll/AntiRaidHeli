@@ -39,6 +39,7 @@ Damage by the structure owner, authorized Tool Cupboard users, native teammates,
 
 - Only the helicopter created for a particular raid is modified.
 - Vanilla patrol helicopters are not changed.
+- The server-wide `patrolhelicopterai.flee_damage_percentage` value is ignored only for AntiRaidHeli aircraft. Event helicopters therefore cannot retreat at low health and falsely advance a response round; vanilla and other plugin helicopters retain the server owner's setting.
 - Confirmed raiders and temporary combatants remain hostile for three minutes after their last hostile action—even through death and respawn—and receive private countdown messages.
 - Raid-hostile players receive a configurable right-side CUI countdown below NoEscape's default raid-block indicator, with a matching compact helicopter silhouette, a small `ROUND` caption, and current/total response indicator such as `1/4` through `4/4`, followed by a brief cleared state and private retreat message.
 - Ordinary armed players use Rust's native threat rules and can disarm to disengage without being classified as raiders.
@@ -83,6 +84,8 @@ Each response profile can independently enable a multi-helicopter group and sele
 Section-level `Enabled` values are deliberate feature switches; the top-level `Enabled` value is the plugin-wide detection switch. Existing configuration files are merged with new defaults on load, and response-profile arrays are replaced rather than appended so updates cannot duplicate response levels.
 
 AntiRaidHeli tags every marker it creates and removes orphaned markers when the plugin loads or the final incident is stopped. Legacy markers created before tagging was introduced are also recognized by their AntiRaidHeli label and matching radius position.
+
+AntiRaidHeli response aircraft must be genuinely destroyed to advance the escalation chain. Native damage-threshold retirement is suppressed per event helicopter without changing any global Rust convar. Plugin-controlled retirement for raid inactivity, cleanup, unloading, and administrator stop remains available.
 
 ## Permissions and commands
 

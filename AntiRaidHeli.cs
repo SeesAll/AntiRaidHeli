@@ -12,7 +12,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("AntiRaidHeli", "SeesAll", "0.6.0")]
+    [Info("AntiRaidHeli", "SeesAll", "0.6.1")]
     [Description("Deploys escalating patrol helicopters over active player raids.")]
     public class AntiRaidHeli : RustPlugin
     {
@@ -70,6 +70,7 @@ namespace Oxide.Plugins
         private Harmony _harmony;
         private MethodInfo _deathEnterMethod;
         private MethodInfo _fireGunMethod;
+        private MethodInfo _retireMethod;
 
         #region Oxide lifecycle
 
@@ -133,18 +134,21 @@ namespace Oxide.Plugins
         {
             try
             {
+                _harmony = new Harmony(HarmonyPatchId);
+
                 _deathEnterMethod = AccessTools.Method(typeof(PatrolHelicopterAI),
                     nameof(PatrolHelicopterAI.State_Death_Enter));
-                if (_deathEnterMethod == null)
+                if (_deathEnterMethod != null)
+                {
+                    _harmony.Patch(_deathEnterMethod, postfix: new HarmonyMethod(
+                        typeof(PatrolHelicopterDeathPatch),
+                        nameof(PatrolHelicopterDeathPatch.Postfix)));
+                }
+                else
                 {
                     PrintWarning("Unable to find PatrolHelicopterAI.State_Death_Enter; "
                         + "custom crash destinations are unavailable.");
-                    return;
                 }
-
-                _harmony = new Harmony(HarmonyPatchId);
-                _harmony.Patch(_deathEnterMethod, postfix: new HarmonyMethod(
-                    typeof(PatrolHelicopterDeathPatch), nameof(PatrolHelicopterDeathPatch.Postfix)));
 
                 _fireGunMethod = AccessTools.Method(typeof(PatrolHelicopterAI),
                     nameof(PatrolHelicopterAI.FireGun), new[]
@@ -162,10 +166,25 @@ namespace Oxide.Plugins
                     PrintWarning("Unable to find PatrolHelicopterAI.FireGun; "
                         + "per-response physical aim scaling is unavailable.");
                 }
+
+                _retireMethod = AccessTools.Method(typeof(PatrolHelicopterAI),
+                    nameof(PatrolHelicopterAI.Retire), Type.EmptyTypes);
+                if (_retireMethod != null)
+                {
+                    _harmony.Patch(_retireMethod, prefix: new HarmonyMethod(
+                        typeof(PatrolHelicopterRetirePatch),
+                        nameof(PatrolHelicopterRetirePatch.Prefix)));
+                }
+                else
+                {
+                    PrintWarning("Unable to find PatrolHelicopterAI.Retire; "
+                        + "the server-wide flee-damage threshold may affect "
+                        + "AntiRaidHeli aircraft.");
+                }
             }
             catch (Exception exception)
             {
-                PrintError("Unable to install the AntiRaidHeli death-flight patch: "
+                PrintError("Unable to install the AntiRaidHeli runtime patches: "
                     + exception.Message);
             }
         }
@@ -180,16 +199,33 @@ namespace Oxide.Plugins
                 if (_harmony != null && _fireGunMethod != null)
                     _harmony.Unpatch(_fireGunMethod, HarmonyPatchType.Prefix,
                         HarmonyPatchId);
+                if (_harmony != null && _retireMethod != null)
+                    _harmony.Unpatch(_retireMethod, HarmonyPatchType.Prefix,
+                        HarmonyPatchId);
             }
             catch (Exception exception)
             {
-                PrintWarning("Unable to remove the AntiRaidHeli death-flight patch: "
+                PrintWarning("Unable to remove the AntiRaidHeli runtime patches: "
                     + exception.Message);
             }
 
             _harmony = null;
             _deathEnterMethod = null;
             _fireGunMethod = null;
+            _retireMethod = null;
+        }
+
+        private bool ShouldAllowHelicopterRetire(PatrolHelicopterAI ai)
+        {
+            PatrolHelicopter helicopter = ai?.helicopterBase as PatrolHelicopter;
+            if (helicopter == null || FindIncident(helicopter) == null)
+                return true;
+
+            // Rust's global flee_damage_percentage is appropriate for normal
+            // patrol helicopters, but an AntiRaidHeli response round advances
+            // only after genuine destruction. Intentional plugin retirement is
+            // registered before Retire() is called and remains allowed.
+            return _retiringHelicopters.Contains(helicopter);
         }
 
         private void RegisterHostilityIcon()
@@ -4534,6 +4570,15 @@ namespace Oxide.Plugins
                     Instance?.PrintError("Unable to apply helicopter aim scaling: "
                         + exception.Message);
                 }
+            }
+        }
+
+        private static class PatrolHelicopterRetirePatch
+        {
+            public static bool Prefix(PatrolHelicopterAI __instance)
+            {
+                AntiRaidHeli plugin = Instance;
+                return plugin == null || plugin.ShouldAllowHelicopterRetire(__instance);
             }
         }
 
