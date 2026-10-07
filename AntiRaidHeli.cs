@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Reflection;
+using HarmonyLib;
 using Newtonsoft.Json;
 using Oxide.Core;
 using Oxide.Core.Plugins;
@@ -11,11 +12,11 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("AntiRaidHeli", "SeesAll", "0.3.2")]
+    [Info("AntiRaidHeli", "SeesAll", "0.6.0")]
     [Description("Deploys escalating patrol helicopters over active player raids.")]
     public class AntiRaidHeli : RustPlugin
     {
-        [PluginReference] private Plugin SmartRecon, Clans, Friends;
+        [PluginReference] private Plugin SmartRecon, Clans, Friends, NoEscape;
 
         private const string AdminPermission = "antiraidheli.admin";
         private const string HelicopterPrefab =
@@ -25,8 +26,12 @@ namespace Oxide.Plugins
         private const string RadiusMarkerPrefab =
             "assets/prefabs/tools/map/genericradiusmarker.prefab";
         private const ulong EventHelicopterSkin = 94610420261005UL;
+        private const int MaximumResponseLevels = 4;
         private const float MarkerRadiusScale = 350f;
         private const string HostilityUiName = "AntiRaidHeli.Hostility";
+        private const string HarmonyPatchId = "AntiRaidHeli.Internal";
+        private const string LabelMarkerEntityName = "AntiRaidHeli.LabelMarker";
+        private const string RadiusMarkerEntityName = "AntiRaidHeli.RadiusMarker";
         private const string HostilityIconBase64 =
             "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAfnSURBVHhe7VlrrF1FFQYfUHxEBWs1UBVEBaM1WlJpiI/EapBnCUpRtFaLlaKJKJZHS2J80VYQAV8pAvpLEGsQbREEa9NWMalFqo02tdqkVi0xmPb23t5z9vq+b8y3z+zT3U2vld7Q3Bv3l5ycvWc9Zq2Z2WtmrTniiBYtWrRo0aJFixYtWrRo0aLF/z0GBgZeLOniTqfzupTSs5v08YZNmzYdpU7nVEmzBgYGJjbp+yGl9FKSG1JKCYBI/oXkvQAWRsS7Jb2sKTPWIOl4SbZ1Eckf2wf7Yp9IPmofmzJ9MPgNM44EgoMEHyV5B4B5qUhTJT2/qedwwX0XKk5LKc0jeSeA3xEcatpdR0R8s6mnj5TS8yS9KiLOlHQFyWUkfwHgrwQ7TWUGwSfMQ/L6iJiZUjqpqbcJScd1u903SpqibneKJD8f1+RrYnh4+KSIuEDUYpKrAPy7aY8BoFPa3LNrGYAr7NPw8PDJ9rGp96BwLEgpvVzS2yXNJbmE5I9I/h7AYNMAkjtMB3ClpDNSSi+s6wOw+Uky4OY6T0rpBUVRnCHgM7mvHU0ZAHsAbMz0JZI+KumttvWwxa+U0ou63e4bIuI89Iy9jeSv67NDsvBgkfwqgAUAUBLKL7PPE6ZF8CaSdqpb0awLwCMkb/eguq9utzvFfTftGTNIKT3LAakoitMFzCZ16z53eyCZmMei0f51AHNUFNOtw7qa+sclcoQ+leRPSd4KYDcCg34m+RPTJJ3QlBsFjmw2HDaklI5s/ipaRCyWdCaAx728Jb2HEUtHku0rHY9oOiLptSSXk/wCInY7kEXEFx3IUkqnNGXG5QCMZLSk05vfexOOGU25cYuU0jPz1vR5ANeQfFDSXgIPEXwIwBP59zDJn5Mc8r95s8xc62jqHVcg+cOU0m8J/tkzDOCzFQ3Ag3a49v7pzLO1lCGX9xWNN+zdu3eyCk2T9Aq/k/wSyeH60ZkoZ3tV9e5TWl4FZUBMKb1S0jTrqnjGPJx95VNZeUKUJIIr7TyD19d5y6VfGwCjDI5AQXCF1DsplYMSXJpSOqrOOyYBYEUV0CoHshMekAkN3p8BeKDeJulokgN9HWRNB1bUecckAGy3sYiQ09AqFQXwuU4vL1+QgGsAXE1gK8mtAq52yi3pKvMAuC7LNHVsb/ZXYaSd57DDaWl/yjIQCIK/YZUD/Bc4TyD5CIBo0iLizmZ/YxJlyip5a1uNwG6f+SvUZ/VAv4rPMuVRGVhtXdbZ7Odpx549eyYVRTGtKIrpRVG8LSLe6cpQRJwVEeemlGYq4kIAswB8AMAl/klyZujnOQT+7lhQVpgOvgDMV/JmmX+klOZYV4o0E8AH/RPkvt7vfiVd6DqE7fHxOlLMSJHe4VS6KIq3DA4OjlwBOhiKTrGwaeBTRelIhJ2vylJ3pJTeJ+nciLDx782p9EWZ5gxRiN4gjBYAFjX9+p8haVKeyXlVRQjAY5IudRuAywF8EsB8kmsB7ABwGYBPSLrc+7mdqD6B6mAj6RjT/C5peWJaUm1x+eBURv8suzTrcz+XEfgbwXXuX5L7mg/g4wAuJfhY2Q84LGCupEtGtQLqYNBlqO5IZ3WSXyO5vt4m6cTS8zyTCp3pdgC/2jdHPRBcnWXO6jH3Z3+/EhuA9e6r3lbBttlGBpc0aaNCVvwAyX+JvEHScysayS9LWuOsrme31rqqY5qkN9ed8VJPKT2jWtqNLU5Z5oK6TFEUU3M/7ndt5h30s/uu7MinyJsI7sw5x/SKNiq4iJFrfPcXRXFamcyQ36n2XUYsy0b57L7OzyTvNq3T6by6Kn/l5fwHSRMJrqnaqoNOjvaTSG6uDZADwcllP+T3S93guqp0z+BtptkWkt/1iVHSm0StJLhjaGho9MUVf+MefQCfIumoPIPkwxrS8aZ7V8jOvMYO5OeLTPNKQUS5MqqZ9gXFXmkyyf6W4Hqg7xwAXFznBeAT4XOsy4Ezy09Mnc4pfo6Id+V+TnBOEREzJO10FZjkjba94c5TR0ScT9L78WwvMQDXAthVfQY+95deIM2rjCT5rUpeKIPhAMnKqav8GQD4p7etshoE7DBvplnelzIDDn41O76d5b3lzs98i8s+PNC9M4NT7q8I+BBJF1rOr+QPGdu3bz8GgOt1d/vbyvn6gopOcFU25vaIcMJiIzfWdVQDk/nu9+2Md5OKDmCDpJc4aar4vBrqOghuzPI3MPi98hn8ZUWXdKVrDLYxpXQPgHubucchY9u2bRM8O5JucSBzWxUDAHxMVBER55QVYKnrmajLk1xRnvmlWZ6VXLdPEtc4gPaeNVnSOeYhucUDVdchyCX3roObpLMlFd4K9+ORzpN0s8vzW7ZsObpOe1qh4V6gMnz74n0+pTTVl5GKONtLWtLrK578CSwUy1slV4QWua2vr1c5tpAHZKIkX39N8K1Vjaff55iDL0DyMt4AwFH7Rrc3i5wk73J0r97rdEY4iHl7XZ+X/gH3/gpjJhs0ANyXv9HHfYdH8pYn82j2vu89zana+wNA3kyWdcOdeTDv20/BWAbJe7LR3t7WC/pIk6fK+TPfdQegf9iyVVpsnU2eMQsHvWy0v/1jm3SjKIprawOwX9CssGvXrmNrZ4KVTfqYRbfbdSLyx4j4wUj3esPDwyc6+/P26ecm3XBJPCLukvQnJztNeosWLVq0aNGiRYsWLVq0OET8B0X7lVaA6QBZAAAAAElFTkSuQmCC";
 
@@ -37,34 +42,58 @@ namespace Oxide.Plugins
         private static readonly FieldInfo PassNapalmField = typeof(PatrolHelicopterAI)
             .GetField("passNapalm", BindingFlags.Instance | BindingFlags.Public
                 | BindingFlags.NonPublic);
+        private static readonly FieldInfo ReachedSpinoutLocationField =
+            typeof(PatrolHelicopterAI).GetField("reachedSpinoutLocation",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+        private static readonly FieldInfo ForceTerrainPushbackField =
+            typeof(PatrolHelicopterAI).GetField("forceTerrainPushback",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+
+        private static AntiRaidHeli Instance;
 
         private PluginConfiguration _config;
         private readonly List<RaidIncident> _incidents = new List<RaidIncident>();
         private readonly HashSet<PatrolHelicopter> _retiringHelicopters =
             new HashSet<PatrolHelicopter>();
+        private readonly Dictionary<ulong, float> _repairLockNoticeAt =
+            new Dictionary<ulong, float>();
         private readonly Dictionary<uint, RecentConstructionRecord> _recentConstruction =
             new Dictionary<uint, RecentConstructionRecord>();
+        private readonly HashSet<string> _invalidLanguageFormats =
+            new HashSet<string>();
         private Timer _maintenanceTimer;
         private float _nextConstructionPruneAt;
         private float _nextConstructionSaveAt;
         private bool _constructionDataDirty;
         private bool _unloading;
         private uint _hostilityIconCrc;
+        private Harmony _harmony;
+        private MethodInfo _deathEnterMethod;
+        private MethodInfo _fireGunMethod;
 
         #region Oxide lifecycle
 
         private void Init()
         {
+            Instance = this;
             permission.RegisterPermission(AdminPermission, this);
             RegisterMessages();
         }
 
         private void OnServerInitialized()
         {
+            ApplyHarmonyPatches();
             RegisterHostilityIcon();
+            CleanupOrphanedMarkers();
             LoadConstructionHistory();
-            LoadRaidProgress();
+            if (_config.Enabled)
+                LoadRaidProgress();
+            else
+                ClearRaidProgress();
             _maintenanceTimer = timer.Every(1f, MaintainIncidents);
+            Puts("Automatic raid protection is " + (_config.Enabled
+                ? "ENABLED."
+                : "DISABLED. Use /antiraidhelistart to enable it."));
         }
 
         private void OnServerSave()
@@ -76,6 +105,7 @@ namespace Oxide.Plugins
         private void Unload()
         {
             _unloading = true;
+            RemoveHarmonyPatches();
             _maintenanceTimer?.Destroy();
             _maintenanceTimer = null;
             SaveConstructionHistory();
@@ -96,6 +126,70 @@ namespace Oxide.Plugins
                     helicopter.Kill();
             }
             _retiringHelicopters.Clear();
+            Instance = null;
+        }
+
+        private void ApplyHarmonyPatches()
+        {
+            try
+            {
+                _deathEnterMethod = AccessTools.Method(typeof(PatrolHelicopterAI),
+                    nameof(PatrolHelicopterAI.State_Death_Enter));
+                if (_deathEnterMethod == null)
+                {
+                    PrintWarning("Unable to find PatrolHelicopterAI.State_Death_Enter; "
+                        + "custom crash destinations are unavailable.");
+                    return;
+                }
+
+                _harmony = new Harmony(HarmonyPatchId);
+                _harmony.Patch(_deathEnterMethod, postfix: new HarmonyMethod(
+                    typeof(PatrolHelicopterDeathPatch), nameof(PatrolHelicopterDeathPatch.Postfix)));
+
+                _fireGunMethod = AccessTools.Method(typeof(PatrolHelicopterAI),
+                    nameof(PatrolHelicopterAI.FireGun), new[]
+                    {
+                        typeof(Vector3), typeof(float), typeof(bool)
+                    });
+                if (_fireGunMethod != null)
+                {
+                    _harmony.Patch(_fireGunMethod, prefix: new HarmonyMethod(
+                        typeof(PatrolHelicopterFireGunPatch),
+                        nameof(PatrolHelicopterFireGunPatch.Prefix)));
+                }
+                else
+                {
+                    PrintWarning("Unable to find PatrolHelicopterAI.FireGun; "
+                        + "per-response physical aim scaling is unavailable.");
+                }
+            }
+            catch (Exception exception)
+            {
+                PrintError("Unable to install the AntiRaidHeli death-flight patch: "
+                    + exception.Message);
+            }
+        }
+
+        private void RemoveHarmonyPatches()
+        {
+            try
+            {
+                if (_harmony != null && _deathEnterMethod != null)
+                    _harmony.Unpatch(_deathEnterMethod, HarmonyPatchType.Postfix,
+                        HarmonyPatchId);
+                if (_harmony != null && _fireGunMethod != null)
+                    _harmony.Unpatch(_fireGunMethod, HarmonyPatchType.Prefix,
+                        HarmonyPatchId);
+            }
+            catch (Exception exception)
+            {
+                PrintWarning("Unable to remove the AntiRaidHeli death-flight patch: "
+                    + exception.Message);
+            }
+
+            _harmony = null;
+            _deathEnterMethod = null;
+            _fireGunMethod = null;
         }
 
         private void RegisterHostilityIcon()
@@ -151,13 +245,36 @@ namespace Oxide.Plugins
         private void OnPlayerDisconnected(BasePlayer player, string reason)
         {
             if (player != null)
+            {
                 CuiHelper.DestroyUi(player, HostilityUiName);
+                _repairLockNoticeAt.Remove(player.userID);
+            }
         }
 
         private void OnEntityDeath(BasePlayer player, HitInfo info)
         {
             if (player != null)
                 CuiHelper.DestroyUi(player, HostilityUiName);
+        }
+
+        private void OnPlayerRespawned(BasePlayer player)
+        {
+            if (player == null)
+                return;
+
+            NextTick(() =>
+            {
+                if (player == null || !player.IsConnected || !player.IsAlive())
+                    return;
+
+                float remaining = GetHostilityRemaining(player.userID);
+                if (_config.HostilityUi.Enabled && remaining > 0f)
+                    DrawHostilityUi(player, remaining, false);
+
+                RaidIncident incident = GetNewestHostilityIncident(player.userID);
+                if (incident != null && IsAggressorOwner(incident, player.userID))
+                    RefreshExternalRaidBlock(player, incident);
+            });
         }
 
         protected override void LoadDefaultConfig()
@@ -228,13 +345,25 @@ namespace Oxide.Plugins
 
             if (entity is PatrolHelicopter)
             {
-                RaidIncident incident = FindIncident(entity as PatrolHelicopter);
+                PatrolHelicopter damagedHelicopter = entity as PatrolHelicopter;
+                RaidIncident incident = FindIncident(damagedHelicopter);
                 BasePlayer helicopterAttacker = ResolveAttackingPlayer(info);
                 if (incident != null && helicopterAttacker != null
                     && IsInsideDangerZone(incident, helicopterAttacker.transform.position))
                 {
-                    RecordCombatHostility(incident, helicopterAttacker,
-                        Time.realtimeSinceStartup);
+                    float now = Time.realtimeSinceStartup;
+                    float helicopterDamage = Mathf.Max(0f, info.damageTypes.Total());
+                    ResponseProfile profile = incident.GetCurrentProfile(_config);
+                    float healthFraction = profile == null || profile.Health <= 0f
+                        ? 1f : Mathf.Clamp01((damagedHelicopter.Health()
+                            - helicopterDamage) / profile.Health);
+                    RecordCombatHostility(incident, helicopterAttacker, now);
+                    incident.RecordHelicopterDamage(helicopterAttacker.userID,
+                        helicopterDamage, healthFraction, now,
+                        _config.AdaptivePressure.HelicopterCombatActivityWindowSeconds);
+                    incident.LastCombatActivityAt = now;
+                    incident.LastRaidDamageUtc = UtcNowSeconds();
+                    RefreshExternalRaidBlock(helicopterAttacker, incident);
                 }
 
                 return null;
@@ -263,6 +392,9 @@ namespace Oxide.Plugins
                 return null;
 
             if (TryRefreshAdminTestRaidActivity(attacker, entity))
+                return null;
+
+            if (IsExcludedUndergroundRaid(entity))
                 return null;
 
             if (IsFriendlyStructureDamage(attacker, entity)
@@ -316,10 +448,24 @@ namespace Oxide.Plugins
             // Final-response clearance belongs only to the same raiding party
             // continuing against the same victim. A different group or a nearby
             // unrelated base must begin its own response chain.
-            if (incident != null && incident.ResponseCompleted
-                && (!IsVictimAsset(incident, target)
-                    || !IsAggressorOwner(incident, attacker.userID)))
-                incident = null;
+            if (incident != null && incident.ResponseCompleted)
+            {
+                if (!IsVictimAsset(incident, target)
+                    || !IsAggressorOwner(incident, attacker.userID))
+                {
+                    incident = null;
+                }
+                else
+                {
+                    // The original raiding party defeated every response level and
+                    // earned clearance for this victim property. Continued damage
+                    // refreshes that clearance but must not recreate heli hostility
+                    // or attempt to deploy a nonexistent fifth response level.
+                    incident.LastRaidDamageAt = now;
+                    incident.LastRaidDamageUtc = UtcNowSeconds();
+                    return;
+                }
+            }
 
             if (incident == null)
             {
@@ -351,7 +497,7 @@ namespace Oxide.Plugins
             incident.QualifyingDamage += damage;
             incident.RecordRaidDamage(now,
                 _config.AdaptivePressure.ActivityWindowSeconds);
-            RecordRaidAggressor(incident, attacker, now);
+            RecordRaidAggressor(incident, attacker, now, damage);
 
             // Let the hotspot follow nearby structural damage gradually without allowing one hit
             // near the merge boundary to teleport an established event away from its participants.
@@ -396,6 +542,9 @@ namespace Oxide.Plugins
                 return;
 
             bool escalating = incident.AwaitingRenewedRaidDamage;
+            incident.SpawnTimer?.Destroy();
+            incident.SpawnTimer = null;
+            incident.EscalationDueUtc = 0d;
             incident.PausedForInactivity = false;
             incident.AwaitingRenewedRaidDamage = false;
             CreateOrUpdateMarkers(incident);
@@ -434,6 +583,32 @@ namespace Oxide.Plugins
         {
             return entity is BuildingBlock || entity is Door || entity is SimpleBuildingBlock
                 || entity is BuildingPrivlidge;
+        }
+
+        private bool IsExcludedUndergroundRaid(BaseCombatEntity target)
+        {
+            if (!_config.RaidDetection.ExcludeUndergroundCaveBases
+                || target == null || TerrainMeta.HeightMap == null)
+                return false;
+
+            float requiredDepth = _config.RaidDetection
+                .UndergroundDepthThresholdMeters;
+            if (GetDepthBelowTerrain(target.CenterPoint()) >= requiredDepth)
+                return true;
+
+            // The attacked piece may be close to a cave entrance while the
+            // Tool Cupboard and the majority of the connected base are deep
+            // underground. Treat that connected property as a cave base too.
+            BuildingPrivlidge privilege = target as BuildingPrivlidge
+                ?? target.GetBuildingPrivilege();
+            return privilege != null && privilege != target
+                && GetDepthBelowTerrain(privilege.CenterPoint()) >= requiredDepth;
+        }
+
+        private static float GetDepthBelowTerrain(Vector3 position)
+        {
+            return TerrainMeta.HeightMap == null ? 0f : Mathf.Max(0f,
+                TerrainMeta.HeightMap.GetHeight(position) - position.y);
         }
 
         private bool IsFriendlyStructureDamage(BasePlayer attacker, BaseCombatEntity entity)
@@ -505,6 +680,76 @@ namespace Oxide.Plugins
             return false;
         }
 
+        private object OnStructureRepair(BaseCombatEntity entity, BasePlayer player)
+        {
+            RaidIncident incident;
+            if (!TryGetRepairLockedIncident(entity, out incident))
+                return null;
+
+            NotifyRepairLocked(player);
+            return false;
+        }
+
+        private object OnStructureUpgrade(BuildingBlock block, BasePlayer player,
+            BuildingGrade.Enum grade)
+        {
+            RaidIncident incident;
+            if (!TryGetRepairLockedIncident(block, out incident))
+                return null;
+
+            NotifyRepairLocked(player);
+            return false;
+        }
+
+        private object CanBuild(Planner planner, Construction construction,
+            Construction.Target target)
+        {
+            BaseCombatEntity attachedEntity = target.entity as BaseCombatEntity;
+            RaidIncident incident;
+            if (!TryGetRepairLockedIncident(attachedEntity, out incident))
+                return null;
+
+            NotifyRepairLocked(planner?.GetOwnerPlayer());
+            return false;
+        }
+
+        private bool TryGetRepairLockedIncident(BaseCombatEntity entity,
+            out RaidIncident lockedIncident)
+        {
+            lockedIncident = null;
+            if (entity == null)
+                return false;
+
+            for (int i = 0; i < _incidents.Count; i++)
+            {
+                RaidIncident incident = _incidents[i];
+                if (incident == null || !incident.Qualified
+                    || incident.ResponseCompleted || incident.PausedForInactivity
+                    || !CanHelicopterDamageAsset(incident, entity))
+                    continue;
+
+                lockedIncident = incident;
+                return true;
+            }
+
+            return false;
+        }
+
+        private void NotifyRepairLocked(BasePlayer player)
+        {
+            if (player == null || !player.IsConnected)
+                return;
+
+            float now = Time.realtimeSinceStartup;
+            float lastNotice;
+            if (_repairLockNoticeAt.TryGetValue(player.userID, out lastNotice)
+                && now - lastNotice < 5f)
+                return;
+
+            _repairLockNoticeAt[player.userID] = now;
+            Reply(player, "RepairLocked");
+        }
+
         private bool IsVictimAsset(RaidIncident incident,
             BaseCombatEntity target)
         {
@@ -512,10 +757,15 @@ namespace Oxide.Plugins
                 return false;
 
             uint buildingId = GetBuildingId(target);
-            return (buildingId != 0
-                    && incident.ProtectedBuildingIds.Contains(buildingId))
-                || (target.OwnerID.IsSteamId()
-                    && IsVictimOwner(incident, target.OwnerID));
+            if (buildingId != 0)
+                return incident.ProtectedBuildingIds.Contains(buildingId);
+
+            // Owner matching is only a fallback for standalone deployables that
+            // Rust cannot associate with a connected building. A separately
+            // constructed base receives its own response chain even when it has
+            // the same owner and is near a previously cleared raid.
+            return target.OwnerID.IsSteamId()
+                && IsVictimOwner(incident, target.OwnerID);
         }
 
         private void RecordCombatHostility(RaidIncident incident, BasePlayer player,
@@ -527,13 +777,34 @@ namespace Oxide.Plugins
             incident.RecordAggressor(player.userID, time);
         }
 
+        private void RefreshExternalRaidBlock(BasePlayer player, RaidIncident incident)
+        {
+            if (player == null || incident == null || NoEscape == null
+                || !NoEscape.IsLoaded)
+                return;
+
+            // BetterTC and similar repair systems already honor NoEscape. Refreshing
+            // the raider's block when they fight the response prevents a death or a
+            // long helicopter battle from opening a repair-all gap between rounds.
+            try
+            {
+                NoEscape.Call("StartRaidBlocking", player, incident.Center, false);
+            }
+            catch (Exception exception)
+            {
+                PrintWarning("Could not refresh NoEscape raid block: "
+                    + exception.Message);
+            }
+        }
+
         private void RecordRaidAggressor(RaidIncident incident, BasePlayer player,
-            float time)
+            float time, float damage = 0f)
         {
             if (incident == null || player == null || !player.userID.IsSteamId())
                 return;
 
             RecordCombatHostility(incident, player, time);
+            incident.RecordRaidAggression(player.userID, Mathf.Max(0f, damage), time);
             incident.AggressorOwnerIds.Add(player.userID);
 
             if (_config.RaidDetection.IgnoreNativeTeamDamage && player.currentTeam != 0UL)
@@ -990,10 +1261,13 @@ namespace Oxide.Plugins
                         AwaitingRenewedRaidDamage = record.AwaitingRenewedRaidDamage,
                         PausedForInactivity = true,
                         ResponseCompleted = record.ResponseCompleted,
+                        EscalationDueUtc = record.EscalationDueUtc,
                         SavedHelicopterHealth = record.SavedHelicopterHealth,
                         SavedMainRotorHealth = record.SavedMainRotorHealth,
                         SavedTailRotorHealth = record.SavedTailRotorHealth
                     };
+                    if (record.SavedHelicopters != null)
+                        incident.SavedHelicopters.AddRange(record.SavedHelicopters);
                     incident.VictimOwnerIds.UnionWith(record.VictimOwnerIds
                         ?? new List<ulong>());
                     incident.AggressorOwnerIds.UnionWith(record.AggressorOwnerIds
@@ -1003,11 +1277,35 @@ namespace Oxide.Plugins
                     incident.HostileBuildingIds.UnionWith(record.HostileBuildingIds
                         ?? new List<uint>());
                     _incidents.Add(incident);
+
+                    if (incident.AwaitingRenewedRaidDamage
+                        && !incident.ResponseCompleted
+                        && record.EscalationDueUtc > 0d)
+                    {
+                        incident.PausedForInactivity = false;
+                        incident.LastCombatActivityAt = Time.realtimeSinceStartup;
+                        ScheduleNextResponse(incident, (float)Math.Max(0d,
+                            record.EscalationDueUtc - nowUtc));
+                    }
                 }
             }
             catch (Exception exception)
             {
                 PrintWarning("Raid response progress could not be loaded: "
+                    + exception.Message);
+            }
+        }
+
+        private void ClearRaidProgress()
+        {
+            try
+            {
+                Interface.Oxide.DataFileSystem.WriteObject(Name + "_RaidProgress",
+                    new RaidProgressData());
+            }
+            catch (Exception exception)
+            {
+                PrintWarning("Could not clear inactive raid progress: "
                     + exception.Message);
             }
         }
@@ -1028,20 +1326,29 @@ namespace Oxide.Plugins
                         || nowUtc - incident.LastRaidDamageUtc > maximumAge)
                         continue;
 
-                    float health = incident.SavedHelicopterHealth;
-                    float mainRotor = incident.SavedMainRotorHealth;
-                    float tailRotor = incident.SavedTailRotorHealth;
-                    PatrolHelicopter helicopter = incident.Helicopter;
-                    if (helicopter != null && !helicopter.IsDestroyed)
+                    var savedStates = new List<HelicopterHealthState>();
+                    incident.PruneDestroyedHelicopters();
+                    for (int helicopterIndex = 0;
+                        helicopterIndex < incident.Helicopters.Count;
+                        helicopterIndex++)
                     {
-                        health = Mathf.Max(1f, helicopter.Health());
-                        if (helicopter.weakspots != null
-                            && helicopter.weakspots.Length >= 2)
-                        {
-                            mainRotor = Mathf.Max(1f, helicopter.weakspots[0].health);
-                            tailRotor = Mathf.Max(1f, helicopter.weakspots[1].health);
-                        }
+                        HelicopterHealthState state = CaptureHelicopterHealth(
+                            incident.Helicopters[helicopterIndex]);
+                        if (state != null)
+                            savedStates.Add(state);
                     }
+                    if (savedStates.Count == 0)
+                        savedStates.AddRange(incident.SavedHelicopters);
+                    if (savedStates.Count == 0 && incident.SavedHelicopterHealth > 0f)
+                        savedStates.Add(new HelicopterHealthState
+                        {
+                            Health = incident.SavedHelicopterHealth,
+                            MainRotorHealth = incident.SavedMainRotorHealth,
+                            TailRotorHealth = incident.SavedTailRotorHealth
+                        });
+
+                    HelicopterHealthState firstState = savedStates.Count > 0
+                        ? savedStates[0] : null;
 
                     data.Incidents.Add(new RaidProgressRecord
                     {
@@ -1049,10 +1356,12 @@ namespace Oxide.Plugins
                         LastRaidDamageUtc = incident.LastRaidDamageUtc,
                         ResponseLevel = incident.ResponseLevel,
                         AwaitingRenewedRaidDamage = incident.AwaitingRenewedRaidDamage,
+                        EscalationDueUtc = incident.EscalationDueUtc,
                         ResponseCompleted = incident.ResponseCompleted,
-                        SavedHelicopterHealth = health,
-                        SavedMainRotorHealth = mainRotor,
-                        SavedTailRotorHealth = tailRotor,
+                        SavedHelicopterHealth = firstState?.Health ?? 0f,
+                        SavedMainRotorHealth = firstState?.MainRotorHealth ?? 0f,
+                        SavedTailRotorHealth = firstState?.TailRotorHealth ?? 0f,
+                        SavedHelicopters = savedStates,
                         VictimOwnerIds = new List<ulong>(incident.VictimOwnerIds),
                         AggressorOwnerIds = new List<ulong>(incident.AggressorOwnerIds),
                         ProtectedBuildingIds = new List<uint>(incident.ProtectedBuildingIds),
@@ -1098,7 +1407,8 @@ namespace Oxide.Plugins
 
         private void SpawnHelicopter(RaidIncident incident)
         {
-            if (incident.Helicopter != null && !incident.Helicopter.IsDestroyed)
+            incident.PruneDestroyedHelicopters();
+            if (incident.Helicopters.Count > 0)
                 return;
 
             ResponseProfile profile = incident.GetCurrentProfile(_config);
@@ -1108,39 +1418,68 @@ namespace Oxide.Plugins
                 return;
             }
 
-            Vector3 spawnPosition = GetHelicopterSpawnPosition(incident);
-            Vector3 approachDirection = incident.Center - spawnPosition;
+            int helicopterCount = profile.GetHelicopterCount();
+            Vector3 baseSpawnPosition = GetHelicopterSpawnPosition(incident);
+            Vector3 approachDirection = incident.Center - baseSpawnPosition;
             approachDirection.y = 0f;
             Quaternion spawnRotation = approachDirection.sqrMagnitude > 0.01f
                 ? Quaternion.LookRotation(approachDirection.normalized)
                 : Quaternion.identity;
+            Vector3 formationAxis = approachDirection.sqrMagnitude > 0.01f
+                ? Vector3.Cross(Vector3.up, approachDirection.normalized)
+                : Vector3.right;
 
-            PatrolHelicopter helicopter = GameManager.server.CreateEntity(
-                HelicopterPrefab, spawnPosition, spawnRotation, true) as PatrolHelicopter;
-            if (helicopter == null)
+            incident.SuppressReplacement = false;
+            incident.Helicopters.Clear();
+            incident.HelicoptersReachedZone.Clear();
+            incident.HelicopterUnitIndexes.Clear();
+            incident.HelicopterSpawnedAt = Time.realtimeSinceStartup;
+            incident.LowestHelicopterHealthFraction = 1f;
+            incident.LastHelicopterDamageAt = float.MinValue;
+            List<HelicopterHealthState> savedStates = incident.ConsumeSavedHelicopterStates();
+
+            for (int unitIndex = 0; unitIndex < helicopterCount; unitIndex++)
             {
-                PrintError("Unable to create the AntiRaidHeli patrol helicopter.");
+                float formationOffset = (unitIndex - (helicopterCount - 1) * 0.5f) * 70f;
+                Vector3 spawnPosition = baseSpawnPosition + formationAxis * formationOffset;
+                PatrolHelicopter helicopter = GameManager.server.CreateEntity(
+                    HelicopterPrefab, spawnPosition, spawnRotation, true) as PatrolHelicopter;
+                if (helicopter == null)
+                {
+                    PrintError("Unable to create AntiRaidHeli helicopter "
+                        + (unitIndex + 1) + " of " + helicopterCount + ".");
+                    continue;
+                }
+
+                helicopter.enableSaving = false;
+                helicopter.skinID = EventHelicopterSkin + (ulong)incident.ResponseLevel;
+                helicopter._name = "AntiRaidHeli-Level-" + incident.ResponseLevel
+                    + "-Unit-" + (unitIndex + 1);
+                incident.Helicopters.Add(helicopter);
+                incident.HelicopterUnitIndexes[helicopter] = unitIndex;
+                helicopter.Spawn();
+
+                // Native initialization replaces the requested creation point with a
+                // map-edge entry, so restore the spaced formation after Spawn.
+                helicopter.transform.SetPositionAndRotation(spawnPosition, spawnRotation);
+                helicopter.UpdateNetworkGroup();
+                helicopter.SendNetworkUpdateImmediate();
+
+                HelicopterHealthState savedState = unitIndex < savedStates.Count
+                    ? savedStates[unitIndex] : null;
+                int configuredUnitIndex = unitIndex;
+                NextTick(() => ConfigureHelicopter(incident, helicopter, profile,
+                    savedState, configuredUnitIndex));
+            }
+
+            incident.Helicopter = incident.Helicopters.Count > 0
+                ? incident.Helicopters[0] : null;
+            if (incident.Helicopter == null)
+            {
                 ScheduleHelicopter(incident, 15f);
                 return;
             }
 
-            helicopter.enableSaving = false;
-            helicopter.skinID = EventHelicopterSkin + (ulong)incident.ResponseLevel;
-            helicopter._name = "AntiRaidHeli-Level-" + incident.ResponseLevel;
-            incident.SuppressReplacement = false;
-            incident.HelicopterReachedZone = false;
-            incident.Helicopter = helicopter;
-            incident.HelicopterSpawnedAt = Time.realtimeSinceStartup;
-            helicopter.Spawn();
-
-            // PatrolHelicopter's native initialization replaces the requested creation
-            // point with a vanilla map-edge entry. Reapply our calculated position after
-            // Spawn, matching the proven custom-helicopter sequence used by HeliSignals.
-            helicopter.transform.SetPositionAndRotation(spawnPosition, spawnRotation);
-            helicopter.UpdateNetworkGroup();
-            helicopter.SendNetworkUpdateImmediate();
-
-            NextTick(() => ConfigureHelicopter(incident, helicopter, profile));
             CreateOrUpdateMarkers(incident);
         }
 
@@ -1227,30 +1566,143 @@ namespace Oxide.Plugins
             return height;
         }
 
-        private void ConfigureHelicopter(RaidIncident incident, PatrolHelicopter helicopter,
-            ResponseProfile profile)
+        private void ApplyControlledCrashDestination(PatrolHelicopterAI ai)
         {
-            if (helicopter == null || helicopter.IsDestroyed || incident.Helicopter != helicopter)
+            if (ai == null || !_config.Helicopter.RandomizeCrashDestination)
                 return;
 
-            float startingHealth = incident.SavedHelicopterHealth > 0f
-                ? Mathf.Min(incident.SavedHelicopterHealth, profile.Health)
+            PatrolHelicopter helicopter = ai.helicopterBase as PatrolHelicopter;
+            RaidIncident incident = FindIncident(helicopter);
+            if (incident == null || incident.SuppressReplacement
+                || _retiringHelicopters.Contains(helicopter))
+                return;
+
+            Vector3 crashDestination;
+            if (!TryFindRandomDryLandInRing(incident.Center,
+                _config.Helicopter.MinimumCrashDistanceFromRaid,
+                _config.Helicopter.MaximumCrashDistanceFromRaid,
+                out crashDestination))
+            {
+                PrintWarning("No valid dry-land crash destination was found between "
+                    + _config.Helicopter.MinimumCrashDistanceFromRaid.ToString("0", CultureInfo.InvariantCulture)
+                    + " and "
+                    + _config.Helicopter.MaximumCrashDistanceFromRaid.ToString("0", CultureInfo.InvariantCulture)
+                    + " meters from the raid. The helicopter will use Rust's native crash flight.");
+                return;
+            }
+
+            bool spinoutAlreadyStarted = ReachedSpinoutLocationField != null
+                && (bool)ReachedSpinoutLocationField.GetValue(ai);
+            ReachedSpinoutLocationField?.SetValue(ai, false);
+            ForceTerrainPushbackField?.SetValue(ai, true);
+
+            // Rust may have begun an immediate spinout when no monument was nearby.
+            // Restore the configured handling before sending the dying helicopter to
+            // our land destination; it will enter its native final spin when it arrives.
+            if (spinoutAlreadyStarted)
+            {
+                ResponseProfile profile = incident.GetCurrentProfile(_config);
+                if (profile != null)
+                    ai.maxRotationSpeed = profile.MaximumRotationSpeed;
+            }
+
+            crashDestination.y = GetSurfaceHeight(crashDestination) + ai.GetPlaneHeight();
+            incident.CrashDestination = crashDestination;
+            ai.SetTargetDestination(crashDestination, 25f, 30f);
+        }
+
+        private void ApplyGunAimConeScale(PatrolHelicopterAI ai, ref float aimCone)
+        {
+            PatrolHelicopter helicopter = ai?.helicopterBase as PatrolHelicopter;
+            RaidIncident incident = FindIncident(helicopter);
+            ResponseProfile profile = incident?.GetCurrentProfile(_config);
+            if (profile == null)
+                return;
+
+            aimCone *= profile.GunAimConeScale;
+        }
+
+        private static bool TryFindRandomDryLandInRing(Vector3 center,
+            float minimumDistance, float maximumDistance, out Vector3 position)
+        {
+            position = Vector3.zero;
+            if (TerrainMeta.HeightMap == null || TerrainMeta.WaterMap == null)
+                return false;
+
+            float halfX = TerrainMeta.Size.x * 0.5f - 25f;
+            float halfZ = TerrainMeta.Size.z * 0.5f - 25f;
+            float minimumSquared = minimumDistance * minimumDistance;
+            float maximumSquared = maximumDistance * maximumDistance;
+
+            // Random area-uniform sampling prevents the same compass direction or
+            // the nearest monument from repeatedly receiving the wreckage.
+            for (int attempt = 0; attempt < 48; attempt++)
+            {
+                float angle = UnityEngine.Random.Range(0f, Mathf.PI * 2f);
+                float distance = Mathf.Sqrt(UnityEngine.Random.Range(minimumSquared,
+                    maximumSquared));
+                Vector3 candidate = center + new Vector3(Mathf.Cos(angle), 0f,
+                    Mathf.Sin(angle)) * distance;
+                if (Mathf.Abs(candidate.x) >= halfX || Mathf.Abs(candidate.z) >= halfZ
+                    || !IsDryLand(candidate))
+                    continue;
+
+                position = candidate;
+                return true;
+            }
+
+            // Coastal raids can have a small valid land arc. Sweep randomized
+            // directions as a deterministic fallback while retaining the distance ring.
+            float rotationOffset = UnityEngine.Random.Range(0f, Mathf.PI * 2f);
+            const int directions = 72;
+            for (float distance = maximumDistance; distance >= minimumDistance;
+                distance -= 25f)
+            {
+                for (int index = 0; index < directions; index++)
+                {
+                    float angle = rotationOffset + Mathf.PI * 2f * index / directions;
+                    Vector3 candidate = center + new Vector3(Mathf.Cos(angle), 0f,
+                        Mathf.Sin(angle)) * distance;
+                    if (Mathf.Abs(candidate.x) >= halfX || Mathf.Abs(candidate.z) >= halfZ
+                        || !IsDryLand(candidate))
+                        continue;
+
+                    position = candidate;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private void ConfigureHelicopter(RaidIncident incident, PatrolHelicopter helicopter,
+            ResponseProfile profile, HelicopterHealthState savedState, int unitIndex)
+        {
+            if (helicopter == null || helicopter.IsDestroyed
+                || !incident.Helicopters.Contains(helicopter))
+                return;
+
+            float startingHealth = savedState != null && savedState.Health > 0f
+                ? Mathf.Min(savedState.Health, profile.Health)
                 : profile.Health;
             helicopter._maxHealth = profile.Health;
             helicopter.startHealth = profile.Health;
             helicopter.InitializeHealth(startingHealth, profile.Health);
+            helicopter.maxCratesToSpawn = profile.LootCratesOnDeath;
             helicopter.bulletDamage = profile.BulletDamage;
             helicopter.bulletSpeed = profile.BulletSpeed;
 
             if (helicopter.weakspots != null && helicopter.weakspots.Length >= 2)
             {
                 helicopter.weakspots[0].maxHealth = profile.MainRotorHealth;
-                helicopter.weakspots[0].health = incident.SavedMainRotorHealth > 0f
-                    ? Mathf.Min(incident.SavedMainRotorHealth, profile.MainRotorHealth)
+                helicopter.weakspots[0].health = savedState != null
+                    && savedState.MainRotorHealth > 0f
+                    ? Mathf.Min(savedState.MainRotorHealth, profile.MainRotorHealth)
                     : profile.MainRotorHealth;
                 helicopter.weakspots[1].maxHealth = profile.TailRotorHealth;
-                helicopter.weakspots[1].health = incident.SavedTailRotorHealth > 0f
-                    ? Mathf.Min(incident.SavedTailRotorHealth, profile.TailRotorHealth)
+                helicopter.weakspots[1].health = savedState != null
+                    && savedState.TailRotorHealth > 0f
+                    ? Mathf.Min(savedState.TailRotorHealth, profile.TailRotorHealth)
                     : profile.TailRotorHealth;
             }
 
@@ -1264,7 +1716,8 @@ namespace Oxide.Plugins
                 ai.timeBetweenRockets = profile.SecondsBetweenRockets;
                 ai.numRocketsLeft = profile.EnableRockets
                     ? profile.MaximumRocketsPerAttack : 0;
-                ai.lastStrafeTime = Time.realtimeSinceStartup;
+                ai.lastStrafeTime = Time.realtimeSinceStartup
+                    + unitIndex * _config.Helicopter.MultiHelicopterAttackStaggerSeconds;
 
                 if (ai.leftGun != null)
                 {
@@ -1292,9 +1745,6 @@ namespace Oxide.Plugins
 
             helicopter.UpdateNetworkGroup();
             helicopter.SendNetworkUpdateImmediate();
-            incident.SavedHelicopterHealth = 0f;
-            incident.SavedMainRotorHealth = 0f;
-            incident.SavedTailRotorHealth = 0f;
         }
 
         private void OnEntityKill(PatrolHelicopter helicopter)
@@ -1306,16 +1756,30 @@ namespace Oxide.Plugins
             if (incident == null)
                 return;
 
-            incident.Helicopter = null;
             ClearHelicopterTargets(helicopter?.myAI);
+            incident.Helicopters.Remove(helicopter);
+            incident.HelicoptersReachedZone.Remove(helicopter);
+            incident.HelicopterUnitIndexes.Remove(helicopter);
+            incident.PruneDestroyedHelicopters();
+            incident.Helicopter = incident.Helicopters.Count > 0
+                ? incident.Helicopters[0] : null;
 
             if (_unloading || incident.SuppressReplacement)
                 return;
 
+            // A multi-helicopter response is one escalation round. Do not grant
+            // victory or advance until every helicopter in that round is destroyed.
+            if (incident.Helicopters.Count > 0)
+            {
+                SaveRaidProgress();
+                return;
+            }
+
             if (incident.ResponseLevel >= _config.ResponseProfiles.Count)
             {
                 incident.ResponseCompleted = true;
-                BroadcastRaidAlert(incident, "FinalDefeated", null);
+                ClearIncidentHostility(incident);
+                BroadcastRaidAlert(incident, "FinalDefeatedV2", null);
                 DestroyMarker(ref incident.LabelMarker);
                 DestroyMarker(ref incident.RadiusMarker);
                 SaveRaidProgress();
@@ -1324,13 +1788,45 @@ namespace Oxide.Plugins
 
             incident.ResponseLevel++;
             incident.AwaitingRenewedRaidDamage = true;
+            incident.PausedForInactivity = false;
+            incident.LastCombatActivityAt = Time.realtimeSinceStartup;
             incident.SavedHelicopterHealth = 0f;
             incident.SavedMainRotorHealth = 0f;
             incident.SavedTailRotorHealth = 0f;
+            incident.SavedHelicopters.Clear();
             CreateOrUpdateMarkers(incident);
-            BroadcastRaidAlert(incident, "EscalationAlert",
+            BroadcastRaidAlert(incident, "EscalationStandby",
                 incident.GetCurrentProfile(_config)?.Name);
+            ScheduleNextResponse(incident,
+                _config.RaidDetection.SecondsBetweenResponseRounds);
             SaveRaidProgress();
+        }
+
+        private void ScheduleNextResponse(RaidIncident incident, float delaySeconds)
+        {
+            if (incident == null || incident.ResponseCompleted)
+                return;
+
+            incident.SpawnTimer?.Destroy();
+            float delay = Mathf.Max(0f, delaySeconds);
+            incident.EscalationDueUtc = UtcNowSeconds() + delay;
+            incident.SpawnTimer = timer.Once(delay, () =>
+            {
+                incident.SpawnTimer = null;
+                incident.EscalationDueUtc = 0d;
+                if (_unloading || !_incidents.Contains(incident)
+                    || !incident.Qualified || incident.ResponseCompleted
+                    || !incident.AwaitingRenewedRaidDamage)
+                    return;
+
+                incident.PausedForInactivity = false;
+                incident.AwaitingRenewedRaidDamage = false;
+                CreateOrUpdateMarkers(incident);
+                BroadcastRaidAlert(incident, "EscalationDeployed",
+                    incident.GetCurrentProfile(_config)?.Name);
+                SpawnHelicopter(incident);
+                SaveRaidProgress();
+            });
         }
 
         private void OnEntitySpawned(TimedExplosive explosive)
@@ -1456,7 +1952,14 @@ namespace Oxide.Plugins
 
             int hits = incident.CountRecentRaidHits(Time.realtimeSinceStartup,
                 _config.AdaptivePressure.ActivityWindowSeconds);
-            if (hits >= _config.AdaptivePressure.HeavyRaidHitThreshold)
+            ResponseProfile profile = incident.GetCurrentProfile(_config);
+            bool helicopterCombatEscalated = profile != null
+                && Time.realtimeSinceStartup - incident.LastHelicopterDamageAt
+                    <= _config.AdaptivePressure.HelicopterCombatActivityWindowSeconds
+                && incident.LowestHelicopterHealthFraction * 100f
+                    <= profile.CombatEscalationHealthRemainingPercent;
+            if (helicopterCombatEscalated
+                || hits >= _config.AdaptivePressure.HeavyRaidHitThreshold)
                 return 3;
             if (hits >= _config.AdaptivePressure.SustainedRaidHitThreshold)
                 return 2;
@@ -1530,7 +2033,9 @@ namespace Oxide.Plugins
                     continue;
                 }
 
-                if (now - incident.LastRaidDamageAt
+                float lastIncidentActivity = Mathf.Max(incident.LastRaidDamageAt,
+                    incident.LastCombatActivityAt);
+                if (now - lastIncidentActivity
                     > _config.RaidDetection.RaidInactivitySeconds)
                 {
                     if (!incident.PausedForInactivity)
@@ -1548,8 +2053,8 @@ namespace Oxide.Plugins
 
                 MaintainRaidBaseCandidates(incident, now);
 
-                PatrolHelicopter helicopter = incident.Helicopter;
-                if (helicopter == null || helicopter.IsDestroyed || helicopter.myAI == null)
+                incident.PruneDestroyedHelicopters();
+                if (incident.Helicopters.Count == 0)
                     continue;
 
                 if (_config.Helicopter.MaximumLifetimeSeconds > 0f
@@ -1560,9 +2065,18 @@ namespace Oxide.Plugins
                     continue;
                 }
 
-                MaintainHelicopterPosition(incident, helicopter.myAI);
-                RefreshEligibleTargets(incident, helicopter.myAI);
-                TryStartAggressorShelterStrafe(incident, helicopter.myAI);
+                for (int helicopterIndex = incident.Helicopters.Count - 1;
+                    helicopterIndex >= 0; helicopterIndex--)
+                {
+                    PatrolHelicopter helicopter = incident.Helicopters[helicopterIndex];
+                    if (helicopter == null || helicopter.IsDestroyed
+                        || helicopter.myAI == null)
+                        continue;
+
+                    MaintainHelicopterPosition(incident, helicopter.myAI);
+                    RefreshEligibleTargets(incident, helicopter.myAI);
+                    TryStartAggressorShelterStrafe(incident, helicopter.myAI);
+                }
             }
         }
 
@@ -1574,6 +2088,7 @@ namespace Oxide.Plugins
             incident.PausedForInactivity = true;
             incident.SpawnTimer?.Destroy();
             incident.SpawnTimer = null;
+            incident.EscalationDueUtc = 0d;
             DestroyMarker(ref incident.LabelMarker);
             DestroyMarker(ref incident.RadiusMarker);
             foreach (KeyValuePair<ulong, HostilityRecord> pair
@@ -1584,20 +2099,35 @@ namespace Oxide.Plugins
                     CuiHelper.DestroyUi(player, HostilityUiName);
             }
 
-            PatrolHelicopter helicopter = incident.Helicopter;
-            incident.Helicopter = null;
-            if (helicopter != null && !helicopter.IsDestroyed)
+            incident.PruneDestroyedHelicopters();
+            List<PatrolHelicopter> helicopters = new List<PatrolHelicopter>(
+                incident.Helicopters);
+            incident.SavedHelicopters.Clear();
+            for (int i = 0; i < helicopters.Count; i++)
             {
-                incident.SavedHelicopterHealth = Mathf.Max(1f, helicopter.Health());
-                if (helicopter.weakspots != null && helicopter.weakspots.Length >= 2)
-                {
-                    incident.SavedMainRotorHealth = Mathf.Max(1f,
-                        helicopter.weakspots[0].health);
-                    incident.SavedTailRotorHealth = Mathf.Max(1f,
-                        helicopter.weakspots[1].health);
-                }
+                HelicopterHealthState state = CaptureHelicopterHealth(helicopters[i]);
+                if (state != null)
+                    incident.SavedHelicopters.Add(state);
+            }
 
-                incident.SuppressReplacement = true;
+            if (incident.SavedHelicopters.Count > 0)
+            {
+                HelicopterHealthState first = incident.SavedHelicopters[0];
+                incident.SavedHelicopterHealth = first.Health;
+                incident.SavedMainRotorHealth = first.MainRotorHealth;
+                incident.SavedTailRotorHealth = first.TailRotorHealth;
+            }
+
+            incident.Helicopter = null;
+            incident.Helicopters.Clear();
+            incident.HelicoptersReachedZone.Clear();
+            incident.HelicopterUnitIndexes.Clear();
+            incident.SuppressReplacement = true;
+            for (int i = 0; i < helicopters.Count; i++)
+            {
+                PatrolHelicopter helicopter = helicopters[i];
+                if (helicopter == null || helicopter.IsDestroyed)
+                    continue;
                 ClearHelicopterTargets(helicopter.myAI);
                 _retiringHelicopters.Add(helicopter);
                 helicopter.myAI?.Retire();
@@ -1609,20 +2139,44 @@ namespace Oxide.Plugins
                 SaveRaidProgress();
         }
 
+        private static HelicopterHealthState CaptureHelicopterHealth(
+            PatrolHelicopter helicopter)
+        {
+            if (helicopter == null || helicopter.IsDestroyed)
+                return null;
+
+            var state = new HelicopterHealthState
+            {
+                Health = Mathf.Max(1f, helicopter.Health())
+            };
+            if (helicopter.weakspots != null && helicopter.weakspots.Length >= 2)
+            {
+                state.MainRotorHealth = Mathf.Max(1f, helicopter.weakspots[0].health);
+                state.TailRotorHealth = Mathf.Max(1f, helicopter.weakspots[1].health);
+            }
+            return state;
+        }
+
         private void MaintainHelicopterPosition(RaidIncident incident, PatrolHelicopterAI ai)
         {
+            PatrolHelicopter helicopter = ai.helicopterBase as PatrolHelicopter;
+            int unitIndex = incident.GetHelicopterUnitIndex(helicopter);
+            float orbitRadius = Mathf.Min(250f, _config.Helicopter.OrbitRadius
+                + unitIndex * _config.Helicopter.MultiHelicopterOrbitSpacing);
+            bool reachedZone = helicopter != null
+                && incident.HelicoptersReachedZone.Contains(helicopter);
             float distance = HorizontalDistance(ai.transform.position, incident.Center);
-            if (!incident.HelicopterReachedZone
-                && distance <= _config.Helicopter.OrbitRadius + 40f
+            if (helicopter != null && !reachedZone
+                && distance <= orbitRadius + 40f
                 && ai._currentState != PatrolHelicopterAI.aiState.DEATH
                 && ai._currentState != PatrolHelicopterAI.aiState.STRAFE
                 && ai._currentState != PatrolHelicopterAI.aiState.ORBITSTRAFE)
             {
-                incident.HelicopterReachedZone = true;
+                incident.HelicoptersReachedZone.Add(helicopter);
                 ai.hasInterestZone = true;
                 ai.interestZoneOrigin = incident.Center;
                 ai.ExitCurrentState();
-                ai.State_Orbit_Enter(_config.Helicopter.OrbitRadius);
+                ai.State_Orbit_Enter(orbitRadius);
                 return;
             }
 
@@ -1638,7 +2192,7 @@ namespace Oxide.Plugins
 
             ai.hasInterestZone = true;
             ai.interestZoneOrigin = incident.Center;
-            incident.HelicopterReachedZone = false;
+            incident.HelicoptersReachedZone.Remove(helicopter);
             ai.ExitCurrentState();
             ai.State_Move_Enter(GetHelicopterDestination(incident));
         }
@@ -1651,6 +2205,7 @@ namespace Oxide.Plugins
                 BasePlayer player = target?.ply;
                 if (player != null && IsEligibleTarget(incident, ai, player))
                 {
+                    RecordVanillaThreatHostilityIfNeeded(incident, player);
                     // Rust's gun turrets abandon a target when this native visibility
                     // timestamp expires, even if it remains in _targetList.
                     ai.UpdateTargetLineOfSightTime(target);
@@ -1671,6 +2226,7 @@ namespace Oxide.Plugins
 
                 // Preserve the native acquisition bookkeeping used by both guns.
                 ai.TryAddTarget(player);
+                RecordVanillaThreatHostilityIfNeeded(incident, player);
             }
 
             if (ai.leftGun?._target is BasePlayer left
@@ -1680,37 +2236,109 @@ namespace Oxide.Plugins
                 && !IsEligibleTarget(incident, ai, right))
                 ai.rightGun.ClearTarget();
 
-            BasePlayer fallbackTarget = null;
+            AssignPrioritizedTargets(incident, ai);
+        }
+
+        private void RecordVanillaThreatHostilityIfNeeded(RaidIncident incident,
+            BasePlayer player)
+        {
+            if (incident == null || player == null || IsRecentAggressor(incident, player)
+                || !IsArmedOrThreatening(player))
+                return;
+
+            RecordCombatHostility(incident, player, Time.realtimeSinceStartup);
+        }
+
+        private void AssignPrioritizedTargets(RaidIncident incident,
+            PatrolHelicopterAI ai)
+        {
+            if (incident == null || ai == null)
+                return;
+
+            BasePlayer highest = null;
+            BasePlayer second = null;
+            float highestScore = float.MinValue;
+            float secondScore = float.MinValue;
+            float now = Time.realtimeSinceStartup;
             for (int i = 0; i < ai._targetList.Count; i++)
             {
                 BasePlayer candidate = ai._targetList[i]?.ply;
-                if (candidate != null)
+                if (candidate == null)
+                    continue;
+
+                float score = incident.GetThreatScore(candidate.userID, now,
+                    _config.AdaptivePressure.ActivityWindowSeconds,
+                    _config.AdaptivePressure.HelicopterCombatActivityWindowSeconds);
+                if (IsAggressorOwner(incident, candidate.userID))
+                    score += 250f;
+                if (IsArmedOrThreatening(candidate))
+                    score += 50f;
+                score += Mathf.Max(0f, _config.Targeting.DangerZoneRadius
+                    - HorizontalDistance(candidate.transform.position, incident.Center))
+                    * 0.1f;
+
+                if (score > highestScore)
                 {
-                    fallbackTarget = candidate;
-                    break;
+                    second = highest;
+                    secondScore = highestScore;
+                    highest = candidate;
+                    highestScore = score;
+                }
+                else if (score > secondScore)
+                {
+                    second = candidate;
+                    secondScore = score;
                 }
             }
 
-            RefreshGunTarget(ai.leftGun, ai._targetList, fallbackTarget);
-            RefreshGunTarget(ai.rightGun, ai._targetList, fallbackTarget);
+            if (highest == null)
+            {
+                if (ai.leftGun?.HasTarget() == true)
+                    ai.leftGun.ClearTarget();
+                if (ai.rightGun?.HasTarget() == true)
+                    ai.rightGun.ClearTarget();
+                return;
+            }
+
+            int unitIndex = incident.GetHelicopterUnitIndex(
+                ai.helicopterBase as PatrolHelicopter);
+            BasePlayer primary = unitIndex > 0 && second != null ? second : highest;
+            BasePlayer secondary = unitIndex > 0 && second != null ? highest
+                : second ?? highest;
+
+            PromoteTarget(ai._targetList, primary);
+            SetGunTarget(ai.leftGun, primary);
+            SetGunTarget(ai.rightGun, secondary);
         }
 
-        private static void RefreshGunTarget(HelicopterTurret gun,
-            List<PatrolHelicopterAI.targetinfo> targets, BasePlayer fallbackTarget)
+        private static void PromoteTarget(List<PatrolHelicopterAI.targetinfo> targets,
+            BasePlayer player)
+        {
+            if (targets == null || player == null)
+                return;
+            for (int i = 1; i < targets.Count; i++)
+            {
+                if (targets[i]?.ply != player)
+                    continue;
+                PatrolHelicopterAI.targetinfo preferred = targets[i];
+                targets.RemoveAt(i);
+                targets.Insert(0, preferred);
+                return;
+            }
+        }
+
+        private static void SetGunTarget(HelicopterTurret gun, BasePlayer target)
         {
             if (gun == null)
                 return;
-
-            if (targets == null || targets.Count == 0)
+            if (target == null)
             {
                 if (gun.HasTarget())
                     gun.ClearTarget();
                 return;
             }
-
-            gun.UpdateTargetFromList(targets);
-            if (!gun.HasTarget() && fallbackTarget != null)
-                gun.SetTarget(fallbackTarget);
+            if (gun._target != target)
+                gun.SetTarget(target);
             gun.UpdateTargetVisibility();
         }
 
@@ -1813,6 +2441,55 @@ namespace Oxide.Plugins
                     - (Time.realtimeSinceStartup - newestHostileAt);
         }
 
+        private RaidIncident GetNewestHostilityIncident(ulong userId)
+        {
+            float newestHostileAt = float.MinValue;
+            RaidIncident newest = null;
+            for (int i = 0; i < _incidents.Count; i++)
+            {
+                HostilityRecord record;
+                if (!_incidents[i].TryGetHostilityRecord(userId, out record)
+                    || record.LastHostileAt <= newestHostileAt)
+                    continue;
+
+                newestHostileAt = record.LastHostileAt;
+                newest = _incidents[i];
+            }
+
+            return newest;
+        }
+
+        private int GetHostilityResponseLevel(ulong userId)
+        {
+            float newestHostileAt = float.MinValue;
+            int responseLevel = 1;
+            for (int i = 0; i < _incidents.Count; i++)
+            {
+                HostilityRecord record;
+                if (!_incidents[i].TryGetHostilityRecord(userId, out record)
+                    || record.LastHostileAt <= newestHostileAt)
+                    continue;
+
+                newestHostileAt = record.LastHostileAt;
+                RaidIncident incident = _incidents[i];
+                responseLevel = incident.AwaitingRenewedRaidDamage
+                    ? Mathf.Max(1, incident.ResponseLevel - 1)
+                    : incident.ResponseLevel;
+            }
+
+            return Mathf.Clamp(responseLevel, 1,
+                Mathf.Max(1, _config.ResponseProfiles.Count));
+        }
+
+        private int GetDisplayedResponseLevel(RaidIncident incident)
+        {
+            if (incident == null)
+                return 1;
+            return Mathf.Clamp(incident.AwaitingRenewedRaidDamage
+                    ? incident.ResponseLevel - 1 : incident.ResponseLevel,
+                1, Mathf.Max(1, _config.ResponseProfiles.Count));
+        }
+
         private void DrawHostilityUi(BasePlayer player, float remainingSeconds,
             bool cleared)
         {
@@ -1839,7 +2516,7 @@ namespace Oxide.Plugins
 
             elements.Add(new CuiLabel
             {
-                RectTransform = { AnchorMin = "0.15 0", AnchorMax = "0.72 1" },
+                RectTransform = { AnchorMin = "0.15 0", AnchorMax = "0.59 1" },
                 Text =
                 {
                     Text = cleared ? "HOSTILITY CLEARED" : "HELI HOSTILE",
@@ -1848,6 +2525,32 @@ namespace Oxide.Plugins
                     Color = "1 1 1 1"
                 }
             }, panel);
+            if (!cleared)
+            {
+                elements.Add(new CuiLabel
+                {
+                    RectTransform = { AnchorMin = "0.57 0.50", AnchorMax = "0.72 0.98" },
+                    Text =
+                    {
+                        Text = "ROUND",
+                        FontSize = 7,
+                        Align = TextAnchor.MiddleCenter,
+                        Color = "1 1 1 0.72"
+                    }
+                }, panel);
+                elements.Add(new CuiLabel
+                {
+                    RectTransform = { AnchorMin = "0.57 0.02", AnchorMax = "0.72 0.60" },
+                    Text =
+                    {
+                        Text = GetHostilityResponseLevel(player.userID) + "/"
+                            + Mathf.Max(1, _config.ResponseProfiles.Count),
+                        FontSize = 10,
+                        Align = TextAnchor.MiddleCenter,
+                        Color = "1 1 1 0.88"
+                    }
+                }, panel);
+            }
             elements.Add(new CuiLabel
             {
                 RectTransform = { AnchorMin = "0.70 0", AnchorMax = "0.98 1" },
@@ -1868,8 +2571,8 @@ namespace Oxide.Plugins
             // Matches NoEscape's 13%-wide icon slot and dark silhouette. The
             // embedded PNG is registered in Rust FileStorage; CUI primitives
             // remain as a dependency-free fallback if registration ever fails.
-            string color = cleared ? "0 0 0 0.38"
-                : "0 0 0 0.42";
+            string color = cleared ? "0 0 0 0.50"
+                : "0 0 0 0.65";
 
             if (_hostilityIconCrc != 0)
             {
@@ -1921,12 +2624,24 @@ namespace Oxide.Plugins
         private void TryStartAggressorShelterStrafe(RaidIncident incident,
             PatrolHelicopterAI ai)
         {
+            if (incident == null || ai == null)
+                return;
+
             ResponseProfile profile = incident?.GetCurrentProfile(_config);
+            PatrolHelicopter helicopter = ai?.helicopterBase as PatrolHelicopter;
+            bool recentRaidPressure = Time.realtimeSinceStartup
+                - incident.LastRaidDamageAt
+                    <= _config.AdaptivePressure.StructurePressureSeconds;
+            bool recentEscalatedHelicopterCombat = profile != null
+                && Time.realtimeSinceStartup - incident.LastHelicopterDamageAt
+                    <= _config.AdaptivePressure.HelicopterCombatActivityWindowSeconds
+                && incident.LowestHelicopterHealthFraction * 100f
+                    <= profile.CombatEscalationHealthRemainingPercent;
             if (profile == null || !profile.EnableRockets
-                || profile.MaximumRocketsPerAttack <= 0 || ai == null
-                || !incident.HelicopterReachedZone || ai._targetList.Count > 0
-                || Time.realtimeSinceStartup - incident.LastRaidDamageAt
-                    > _config.AdaptivePressure.StructurePressureSeconds
+                || profile.MaximumRocketsPerAttack <= 0
+                || helicopter == null
+                || !incident.HelicoptersReachedZone.Contains(helicopter)
+                || (!recentRaidPressure && !recentEscalatedHelicopterCombat)
                 || ai._currentState == PatrolHelicopterAI.aiState.STRAFE
                 || ai._currentState == PatrolHelicopterAI.aiState.ORBITSTRAFE
                 || Time.realtimeSinceStartup - ai.lastStrafeTime
@@ -1971,6 +2686,31 @@ namespace Oxide.Plugins
                 ai.State_Strafe_Enter(player);
                 ai.lastStrafeTime = Time.realtimeSinceStartup;
                 return;
+            }
+        }
+
+        private void ClearIncidentHostility(RaidIncident incident)
+        {
+            if (incident == null)
+                return;
+
+            var affectedPlayers = new List<ulong>();
+            foreach (KeyValuePair<ulong, HostilityRecord> pair
+                in incident.GetHostilityRecords())
+                affectedPlayers.Add(pair.Key);
+
+            incident.ClearHostilityRecords();
+            for (int i = 0; i < affectedPlayers.Count; i++)
+            {
+                BasePlayer player = BasePlayer.FindByID(affectedPlayers[i]);
+                if (player == null || !player.IsConnected)
+                    continue;
+
+                float remaining = GetHostilityRemaining(affectedPlayers[i]);
+                if (_config.HostilityUi.Enabled && remaining > 0f)
+                    DrawHostilityUi(player, remaining, false);
+                else
+                    CuiHelper.DestroyUi(player, HostilityUiName);
             }
         }
 
@@ -2151,7 +2891,9 @@ namespace Oxide.Plugins
             if (!_config.MapMarker.Enabled)
                 return;
 
-            ResponseProfile profile = incident.GetCurrentProfile(_config);
+            int displayedLevel = GetDisplayedResponseLevel(incident);
+            ResponseProfile profile = displayedLevel <= _config.ResponseProfiles.Count
+                ? _config.ResponseProfiles[displayedLevel - 1] : null;
             string levelName = profile?.Name ?? "Raid Zone";
 
             if (_config.MapMarker.ShowLabel)
@@ -2161,7 +2903,8 @@ namespace Oxide.Plugins
                 if (label != null)
                 {
                     label.enableSaving = false;
-                    label.markerShopName = FormatMarkerLabel(incident.ResponseLevel, levelName);
+                    label._name = LabelMarkerEntityName;
+                    label.markerShopName = FormatMarkerLabel(displayedLevel, levelName);
                     label.Spawn();
                     incident.LabelMarker = label;
                 }
@@ -2173,8 +2916,9 @@ namespace Oxide.Plugins
                     RadiusMarkerPrefab, incident.Center) as MapMarkerGenericRadius;
                 if (radius != null)
                 {
-                    MarkerColor color = _config.MapMarker.GetColor(incident.ResponseLevel);
+                    MarkerColor color = _config.MapMarker.GetColor(displayedLevel);
                     radius.enableSaving = false;
+                    radius._name = RadiusMarkerEntityName;
                     radius.alpha = Mathf.Clamp01(color.Alpha);
                     radius.radius = Mathf.Clamp(
                         _config.Targeting.DangerZoneRadius / MarkerRadiusScale, 0.05f, 2f);
@@ -2195,11 +2939,13 @@ namespace Oxide.Plugins
 
             if (key == "InitialAlert" && !_config.Announcements.BroadcastInitialResponse)
                 return;
-            if ((key == "EscalationAlert" || key == "EscalationDeployed"
+            if ((key == "EscalationAlert" || key == "EscalationStandby"
+                    || key == "EscalationDeployed"
                     || key == "ResponseResumed")
                 && !_config.Announcements.BroadcastEscalations)
                 return;
-            if ((key == "AllClear" || key == "FinalDefeated")
+            if ((key == "AllClear" || key == "FinalDefeated"
+                    || key == "FinalDefeatedV2")
                 && !_config.Announcements.BroadcastAllClear)
                 return;
 
@@ -2208,8 +2954,28 @@ namespace Oxide.Plugins
             if (arguments != null)
                 fullArguments.AddRange(arguments);
 
-            string message = string.Format(lang.GetMessage(key, this), fullArguments.ToArray());
+            string message = FormatLanguageMessage(key, null, fullArguments.ToArray());
             PrintToChat(message);
+        }
+
+        private string FormatLanguageMessage(string key, string userId,
+            params object[] arguments)
+        {
+            string template = lang.GetMessage(key, this, userId);
+            try
+            {
+                return string.Format(template, arguments ?? Array.Empty<object>());
+            }
+            catch (FormatException exception)
+            {
+                if (_invalidLanguageFormats.Add(key))
+                {
+                    PrintWarning("Language message '" + key
+                        + "' contains incompatible format placeholders; sending it "
+                        + "without substitution instead. " + exception.Message);
+                }
+                return template;
+            }
         }
 
         private static void DestroyMarker<T>(ref T marker) where T : BaseNetworkable
@@ -2217,6 +2983,73 @@ namespace Oxide.Plugins
             if (marker != null && !marker.IsDestroyed)
                 marker.Kill();
             marker = null;
+        }
+
+        private void CleanupOrphanedMarkers()
+        {
+            if (BaseNetworkable.serverEntities == null)
+                return;
+
+            var markersToKill = new List<BaseNetworkable>();
+            var legacyMarkerPositions = new List<Vector3>();
+            foreach (BaseNetworkable networkable in BaseNetworkable.serverEntities)
+            {
+                BaseEntity entity = networkable as BaseEntity;
+                if (entity == null || entity.IsDestroyed)
+                    continue;
+
+                VendingMachineMapMarker label = entity as VendingMachineMapMarker;
+                if (label != null)
+                {
+                    bool tagged = string.Equals(label._name, LabelMarkerEntityName,
+                        StringComparison.Ordinal);
+                    bool legacy = !string.IsNullOrWhiteSpace(label.markerShopName)
+                        && label.markerShopName.IndexOf("Anti-Raid Heli",
+                            StringComparison.OrdinalIgnoreCase) >= 0;
+                    if (!tagged && !legacy)
+                        continue;
+
+                    markersToKill.Add(label);
+                    legacyMarkerPositions.Add(label.transform.position);
+                    continue;
+                }
+
+                MapMarkerGenericRadius radius = entity as MapMarkerGenericRadius;
+                if (radius != null && string.Equals(radius._name,
+                    RadiusMarkerEntityName, StringComparison.Ordinal))
+                    markersToKill.Add(radius);
+            }
+
+            // Older builds did not tag radius markers. Pair those remnants with
+            // an identified AntiRaidHeli label at the exact same map position.
+            if (legacyMarkerPositions.Count > 0)
+            {
+                foreach (BaseNetworkable networkable in BaseNetworkable.serverEntities)
+                {
+                    MapMarkerGenericRadius radius = networkable as MapMarkerGenericRadius;
+                    if (radius == null || radius.IsDestroyed || markersToKill.Contains(radius))
+                        continue;
+                    for (int i = 0; i < legacyMarkerPositions.Count; i++)
+                    {
+                        if (HorizontalDistanceSquared(radius.transform.position,
+                            legacyMarkerPositions[i]) > 4f)
+                            continue;
+                        markersToKill.Add(radius);
+                        break;
+                    }
+                }
+            }
+
+            for (int i = 0; i < markersToKill.Count; i++)
+            {
+                BaseNetworkable marker = markersToKill[i];
+                if (marker != null && !marker.IsDestroyed)
+                    marker.Kill();
+            }
+
+            if (markersToKill.Count > 0)
+                Puts("Removed " + markersToKill.Count
+                    + " orphaned AntiRaidHeli map marker(s).");
         }
 
         private string FormatMarkerLabel(int responseLevel, string responseName)
@@ -2237,6 +3070,12 @@ namespace Oxide.Plugins
         #region Commands
 
         [ChatCommand("antiraidhelistop")]
+        private void CommandLegacyStop(BasePlayer player, string command, string[] args)
+        {
+            CommandStop(player, command, args);
+        }
+
+        [ChatCommand("antiraidstop")]
         private void CommandStop(BasePlayer player, string command, string[] args)
         {
             if (!HasAdminAccess(player))
@@ -2245,8 +3084,12 @@ namespace Oxide.Plugins
                 return;
             }
 
+            bool wasEnabled = _config.Enabled;
+            _config.Enabled = false;
+            SaveConfig();
             int count = StopAllIncidents(true);
-            Reply(player, "Stopped", count);
+            ClearRaidProgress();
+            Reply(player, wasEnabled ? "SystemDisabled" : "AlreadyDisabled", count);
         }
 
         [ChatCommand("antiraidhelistart")]
@@ -2258,14 +3101,15 @@ namespace Oxide.Plugins
                 return;
             }
 
-            int level = 1;
-            if (args != null && args.Length > 0)
-                int.TryParse(args[0], out level);
-            level = Mathf.Clamp(level, 1, _config.ResponseProfiles.Count);
+            if (_config.Enabled)
+            {
+                Reply(player, "AlreadyEnabled");
+                return;
+            }
 
-            StartManualIncident(player.transform.position, level, player.userID);
-            Reply(player, "Started", level,
-                MapHelper.GridToString(MapHelper.PositionToGrid(player.transform.position)));
+            _config.Enabled = true;
+            SaveConfig();
+            Reply(player, "SystemEnabled");
         }
 
         [ChatCommand("antiraidhelitest")]
@@ -2345,13 +3189,41 @@ namespace Oxide.Plugins
                 return;
             }
 
+            bool wasEnabled = _config.Enabled;
+            _config.Enabled = false;
+            SaveConfig();
             int count = StopAllIncidents(true);
-            arg.ReplyWith(string.Format(lang.GetMessage("Stopped", this,
+            ClearRaidProgress();
+            arg.ReplyWith(string.Format(lang.GetMessage(wasEnabled
+                ? "SystemDisabled" : "AlreadyDisabled", this,
                 player?.UserIDString), count));
         }
 
         [ConsoleCommand("antiraidheli.start")]
         private void ConsoleStart(ConsoleSystem.Arg arg)
+        {
+            BasePlayer player = arg.Player();
+            if (player != null && !HasAdminAccess(player))
+            {
+                arg.ReplyWith(lang.GetMessage("NoPermission", this, player.UserIDString));
+                return;
+            }
+
+            if (_config.Enabled)
+            {
+                arg.ReplyWith(lang.GetMessage("AlreadyEnabled", this,
+                    player?.UserIDString));
+                return;
+            }
+
+            _config.Enabled = true;
+            SaveConfig();
+            arg.ReplyWith(lang.GetMessage("SystemEnabled", this,
+                player?.UserIDString));
+        }
+
+        [ConsoleCommand("antiraidheli.test")]
+        private void ConsoleTest(ConsoleSystem.Arg arg)
         {
             BasePlayer player = arg.Player();
             if (player != null && !HasAdminAccess(player))
@@ -2394,7 +3266,7 @@ namespace Oxide.Plugins
             }
 
             RaidIncident incident = StartManualIncident(center, level, aggressorId);
-            arg.ReplyWith(string.Format(lang.GetMessage("Started", this,
+            arg.ReplyWith(string.Format(lang.GetMessage("ManualTestStarted", this,
                 player?.UserIDString), level,
                 MapHelper.GridToString(MapHelper.PositionToGrid(incident.Center))));
         }
@@ -2405,6 +3277,20 @@ namespace Oxide.Plugins
             RaidIncident[] incidents = _incidents.ToArray();
             foreach (RaidIncident incident in incidents)
                 EndIncident(incident, announce, true);
+
+            // An earlier removal can temporarily redraw a player's timer from
+            // another incident that is removed later. That final incident may
+            // not contain the same player, so explicitly clear all AntiRaidHeli
+            // panels once the complete batch has been removed.
+            if (_incidents.Count == 0)
+            {
+                foreach (BasePlayer player in BasePlayer.activePlayerList)
+                {
+                    if (player != null && player.IsConnected)
+                        CuiHelper.DestroyUi(player, HostilityUiName);
+                }
+                CleanupOrphanedMarkers();
+            }
             return count;
         }
 
@@ -2425,15 +3311,24 @@ namespace Oxide.Plugins
 
             incident.SpawnTimer?.Destroy();
             incident.SpawnTimer = null;
+            incident.EscalationDueUtc = 0d;
             DestroyMarker(ref incident.LabelMarker);
             DestroyMarker(ref incident.RadiusMarker);
             RefreshHostilityUiAfterIncidentRemoval(incident);
 
-            PatrolHelicopter helicopter = incident.Helicopter;
+            incident.PruneDestroyedHelicopters();
+            List<PatrolHelicopter> helicopters = new List<PatrolHelicopter>(
+                incident.Helicopters);
             incident.Helicopter = null;
-            if (helicopter != null && !helicopter.IsDestroyed)
+            incident.Helicopters.Clear();
+            incident.HelicoptersReachedZone.Clear();
+            incident.HelicopterUnitIndexes.Clear();
+            incident.SuppressReplacement = true;
+            for (int i = 0; i < helicopters.Count; i++)
             {
-                incident.SuppressReplacement = true;
+                PatrolHelicopter helicopter = helicopters[i];
+                if (helicopter == null || helicopter.IsDestroyed)
+                    continue;
                 ClearHelicopterTargets(helicopter.myAI);
                 if (killHelicopter)
                     helicopter.Kill();
@@ -2491,7 +3386,8 @@ namespace Oxide.Plugins
 
             for (int i = 0; i < _incidents.Count; i++)
             {
-                if (ReferenceEquals(_incidents[i].Helicopter, helicopter))
+                if (_incidents[i].Helicopters.Contains(helicopter)
+                    || ReferenceEquals(_incidents[i].Helicopter, helicopter))
                     return _incidents[i];
             }
             return null;
@@ -2529,8 +3425,7 @@ namespace Oxide.Plugins
 
         private void Reply(BasePlayer player, string key, params object[] args)
         {
-            player.ChatMessage(string.Format(lang.GetMessage(key, this,
-                player.UserIDString), args));
+            player.ChatMessage(FormatLanguageMessage(key, player.UserIDString, args));
         }
 
         private void RegisterMessages()
@@ -2539,17 +3434,23 @@ namespace Oxide.Plugins
             {
                 ["InitialAlert"] = "<color=#ffb347><b>Raid Alert:</b></color> Anti-Raid Helicopter en route to an active raid at <color=#ffd479>{0}</color>. Response: <color=#ffffff>{1}</color>. The danger zone is marked on the map.",
                 ["EscalationAlert"] = "<color=#ff6b35><b>Raid Alert:</b></color> The helicopter at <color=#ffd479>{0}</color> was destroyed. <color=#ffffff>{1}</color> is standing by and will deploy the moment structural raiding resumes.",
+                ["EscalationStandby"] = "<color=#ff6b35><b>Raid Alert:</b></color> The helicopter at <color=#ffd479>{0}</color> was destroyed. <color=#ffffff>{1}</color> will deploy in a few seconds.",
                 ["EscalationDeployed"] = "<color=#ff6b35><b>Raid Alert:</b></color> Structural raiding resumed at <color=#ffd479>{0}</color>. <color=#ffffff>{1}</color> has been deployed.",
                 ["ResponseResumed"] = "<color=#ffb347><b>Raid Alert:</b></color> Raiding resumed at <color=#ffd479>{0}</color>. The paused <color=#ffffff>{1}</color> response is returning.",
-                ["FinalDefeated"] = "<color=#8cff98><b>Raid Alert:</b></color> The final Anti-Raid Helicopter at <color=#ffd479>{0}</color> has been defeated.",
+                ["FinalDefeated"] = "<color=#8cff98><b>Raid Alert:</b></color> The final Anti-Raid Helicopter at <color=#ffd479>{0}</color> has been defeated. You may raid in peace now—you earned it.",
+                ["FinalDefeatedV2"] = "<color=#8cff98><b>Raid Alert:</b></color> The final Anti-Raid Helicopter at <color=#ffd479>{0}</color> has been defeated. You may raid in peace now—you earned it.",
                 ["AllClear"] = "<color=#8cff98><b>Raid Alert Cleared:</b></color> The Anti-Raid Heli danger zone at <color=#ffd479>{0}</color> is no longer active.",
                 ["HostilityThreeMinutes"] = "<color=#ff6b35><b>Anti-Raid Heli:</b></color> You are marked hostile. Cease all hostile activity for <color=#ffffff>3 minutes</color> to surrender.",
                 ["HostilityTwoMinutes"] = "<color=#ffb347><b>Anti-Raid Heli:</b></color> <color=#ffffff>2 minutes</color> until your hostility expires. Any hostile action resets the timer.",
                 ["HostilityOneMinute"] = "<color=#ffd479><b>Anti-Raid Heli:</b></color> <color=#ffffff>1 minute</color> until your hostility expires. Any hostile action resets the timer.",
                 ["HostilityExpired"] = "<color=#8cff98><b>Anti-Raid Heli:</b></color> You are no longer raid-hostile. Disarm, strip down, and get out of here before the heli changes its mind.",
+                ["RepairLocked"] = "<color=#ff6b35><b>Anti-Raid Heli:</b></color> This aggressor structure cannot be repaired, upgraded, or expanded while the response chain is active.",
                 ["NoPermission"] = "You do not have permission to use this command.",
-                ["Stopped"] = "Stopped and cleaned up {0} AntiRaidHeli event(s).",
-                ["Started"] = "Started AntiRaidHeli response level {0} at {1}.",
+                ["SystemEnabled"] = "AntiRaidHeli protection is now enabled and will remain enabled across reloads and restarts.",
+                ["AlreadyEnabled"] = "AntiRaidHeli protection is already enabled.",
+                ["SystemDisabled"] = "AntiRaidHeli protection is now disabled. Cleaned up {0} active event(s).",
+                ["AlreadyDisabled"] = "AntiRaidHeli protection was already disabled. Cleaned up {0} active event(s).",
+                ["ManualTestStarted"] = "Started manual AntiRaidHeli response level {0} at {1}.",
                 ["TestTargetRequired"] = "Look directly at a building belonging to the simulated victim base and try again.",
                 ["TestStarted"] = "Started AntiRaidHeli protection test level {0} at {1}. The targeted building is protected; your other buildings are treated as aggressor structures."
             }, this);
@@ -2574,6 +3475,32 @@ namespace Oxide.Plugins
             if (_config.ResponseProfiles.Count == 0)
                 _config.ResponseProfiles = PluginConfiguration.CreateDefaultProfiles();
 
+            // Early development builds could append default response profiles
+            // while deserializing an existing config. The current serializer no
+            // longer does that, but repair already-affected configs so escalation
+            // ends at the designed fourth and final response.
+            if (_config.ResponseProfiles.Count > MaximumResponseLevels)
+            {
+                int removedCount = _config.ResponseProfiles.Count
+                    - MaximumResponseLevels;
+                _config.ResponseProfiles.RemoveRange(MaximumResponseLevels,
+                    removedCount);
+                PrintWarning("Removed " + removedCount
+                    + " legacy duplicate response profile(s); AntiRaidHeli uses "
+                    + MaximumResponseLevels + " escalation levels.");
+            }
+
+            // A legacy append-merge could also leave four copies of level one
+            // after excess entries were removed. Restore the designed escalation
+            // only when all meaningful behavior fields are identical, preserving
+            // legitimate customized profiles.
+            if (HasDuplicatedLegacyResponseProfiles(_config.ResponseProfiles))
+            {
+                _config.ResponseProfiles = PluginConfiguration.CreateDefaultProfiles();
+                PrintWarning("Rebuilt four duplicated legacy response profiles "
+                    + "with the intended escalation defaults.");
+            }
+
             _config.RaidDetection.MinimumQualifyingHits = Math.Max(1,
                 _config.RaidDetection.MinimumQualifyingHits);
             _config.RaidDetection.MinimumAccumulatedDamage = Mathf.Max(1f,
@@ -2586,10 +3513,14 @@ namespace Oxide.Plugins
                 _config.RaidDetection.MergeRadius);
             _config.RaidDetection.InitialResponseDelaySeconds = Mathf.Max(0f,
                 _config.RaidDetection.InitialResponseDelaySeconds);
+            _config.RaidDetection.SecondsBetweenResponseRounds = Mathf.Max(0f,
+                _config.RaidDetection.SecondsBetweenResponseRounds);
             _config.RaidDetection.RaidInactivitySeconds = Mathf.Max(30f,
                 _config.RaidDetection.RaidInactivitySeconds);
             _config.RaidDetection.MaximumConcurrentRaidZones = Math.Max(1,
                 _config.RaidDetection.MaximumConcurrentRaidZones);
+            _config.RaidDetection.UndergroundDepthThresholdMeters = Mathf.Max(2f,
+                _config.RaidDetection.UndergroundDepthThresholdMeters);
             _config.RaidBaseIdentification.ConstructionHistoryMinutes = Mathf.Max(60f,
                 _config.RaidBaseIdentification.ConstructionHistoryMinutes);
             _config.RaidBaseIdentification.FastClassificationWindowMinutes = Mathf.Clamp(
@@ -2624,6 +3555,9 @@ namespace Oxide.Plugins
                 _config.HostilityUi.ClearedColor, "0.10 0.65 0.20 0.82");
             _config.AdaptivePressure.ActivityWindowSeconds = Mathf.Max(10f,
                 _config.AdaptivePressure.ActivityWindowSeconds);
+            _config.AdaptivePressure.HelicopterCombatActivityWindowSeconds =
+                Mathf.Max(5f, _config.AdaptivePressure
+                    .HelicopterCombatActivityWindowSeconds);
             _config.AdaptivePressure.StructurePressureSeconds = Mathf.Max(5f,
                 _config.AdaptivePressure.StructurePressureSeconds);
             _config.AdaptivePressure.SustainedRaidHitThreshold = Math.Max(2,
@@ -2673,6 +3607,15 @@ namespace Oxide.Plugins
                 _config.Helicopter.MaximumPatrolOvershoot);
             _config.Helicopter.MaximumLifetimeSeconds = Mathf.Max(0f,
                 _config.Helicopter.MaximumLifetimeSeconds);
+            _config.Helicopter.MinimumCrashDistanceFromRaid = Mathf.Max(50f,
+                _config.Helicopter.MinimumCrashDistanceFromRaid);
+            _config.Helicopter.MaximumCrashDistanceFromRaid = Mathf.Max(
+                _config.Helicopter.MinimumCrashDistanceFromRaid,
+                _config.Helicopter.MaximumCrashDistanceFromRaid);
+            _config.Helicopter.MultiHelicopterOrbitSpacing = Mathf.Clamp(
+                _config.Helicopter.MultiHelicopterOrbitSpacing, 20f, 100f);
+            _config.Helicopter.MultiHelicopterAttackStaggerSeconds = Mathf.Clamp(
+                _config.Helicopter.MultiHelicopterAttackStaggerSeconds, 0f, 30f);
             if (string.IsNullOrWhiteSpace(_config.MapMarker.LabelFormat))
                 _config.MapMarker.LabelFormat = "Anti-Raid Heli - Level {0}: {1}";
             ValidateMarkerColor(_config.MapMarker.Level1);
@@ -2711,11 +3654,72 @@ namespace Oxide.Plugins
             }
             if (_config.ConfigurationVersion < 5)
                 _config.ConfigurationVersion = 5;
+            if (_config.ConfigurationVersion < 6)
+            {
+                ApplyEscalationAndLootV6Defaults(_config.ResponseProfiles);
+                _config.ConfigurationVersion = 6;
+            }
+            if (_config.ConfigurationVersion < 7)
+                _config.ConfigurationVersion = 7;
+            if (_config.ConfigurationVersion < 8)
+            {
+                ApplyMultiHelicopterAndAimV8Defaults(_config.ResponseProfiles);
+                _config.ConfigurationVersion = 8;
+            }
+            if (_config.ConfigurationVersion < 9)
+                _config.ConfigurationVersion = 9;
+            if (_config.ConfigurationVersion < 10)
+            {
+                ApplyResponseChainV10Defaults(_config.ResponseProfiles);
+                _config.RaidDetection.SecondsBetweenResponseRounds = 5f;
+                _config.AdaptivePressure.HelicopterCombatActivityWindowSeconds = 30f;
+                _config.ConfigurationVersion = 10;
+            }
+            if (_config.ConfigurationVersion < 11)
+            {
+                _config.RaidDetection.ExcludeUndergroundCaveBases = true;
+                _config.RaidDetection.UndergroundDepthThresholdMeters = 8f;
+                _config.ConfigurationVersion = 11;
+            }
+            if (_config.ConfigurationVersion < 12)
+            {
+                // v0.6.0 is a controlled public-test build. Upgrades begin
+                // inactive and use the same reduced-health ladder validated on
+                // the TEST server so administrators can supervise each session.
+                _config.Enabled = false;
+                ApplyControlledBetaV12Defaults(_config.ResponseProfiles);
+                _config.ConfigurationVersion = 12;
+            }
 
             foreach (ResponseProfile profile in _config.ResponseProfiles)
                 profile.Validate();
             for (int i = 0; i < _config.ResponseProfiles.Count; i++)
                 _config.ResponseProfiles[i].Level = i + 1;
+        }
+
+        private static bool HasDuplicatedLegacyResponseProfiles(
+            List<ResponseProfile> profiles)
+        {
+            if (profiles == null || profiles.Count != MaximumResponseLevels
+                || profiles[0] == null)
+                return false;
+
+            ResponseProfile first = profiles[0];
+            for (int i = 1; i < profiles.Count; i++)
+            {
+                ResponseProfile current = profiles[i];
+                if (current == null
+                    || !string.Equals(current.Name, first.Name,
+                        StringComparison.Ordinal)
+                    || !Mathf.Approximately(current.Health, first.Health)
+                    || !Mathf.Approximately(current.MainRotorHealth,
+                        first.MainRotorHealth)
+                    || !Mathf.Approximately(current.TailRotorHealth,
+                        first.TailRotorHealth))
+                    return false;
+            }
+
+            return true;
         }
 
         private static string NormalizeCuiColor(string value, string fallback)
@@ -2845,13 +3849,129 @@ namespace Oxide.Plugins
             }
         }
 
+        private static void ApplyEscalationAndLootV6Defaults(
+            List<ResponseProfile> profiles)
+        {
+            for (int i = 0; i < profiles.Count; i++)
+            {
+                ResponseProfile profile = profiles[i];
+                if (profile == null)
+                    continue;
+
+                switch (i)
+                {
+                    case 0:
+                        profile.LootCratesOnDeath = 1;
+                        break;
+                    case 1:
+                        profile.LootCratesOnDeath = 1;
+                        profile.MaximumRocketsPerAttack = 12;
+                        profile.SecondsBetweenRockets = 0.18f;
+                        profile.RocketDamageScale = 1.25f;
+                        profile.RocketAttackCooldownSeconds = 18f;
+                        profile.NapalmChancePercent = 45f;
+                        break;
+                    case 2:
+                        profile.LootCratesOnDeath = 2;
+                        profile.MaximumRocketsPerAttack = 16;
+                        profile.SecondsBetweenRockets = 0.16f;
+                        profile.RocketDamageScale = 1.75f;
+                        profile.RocketAttackCooldownSeconds = 14f;
+                        profile.NapalmChancePercent = 65f;
+                        break;
+                    default:
+                        profile.LootCratesOnDeath = 3;
+                        profile.MaximumRocketsPerAttack = 20;
+                        profile.SecondsBetweenRockets = 0.14f;
+                        profile.RocketDamageScale = 2.5f;
+                        profile.RocketAttackCooldownSeconds = 10f;
+                        profile.NapalmChancePercent = 85f;
+                        break;
+                }
+            }
+        }
+
+        private static void ApplyMultiHelicopterAndAimV8Defaults(
+            List<ResponseProfile> profiles)
+        {
+            for (int i = 0; i < profiles.Count; i++)
+            {
+                ResponseProfile profile = profiles[i];
+                if (profile == null)
+                    continue;
+
+                profile.EnableMultiHelicopterResponse = i == 3;
+                profile.HelicopterCount = i == 3 ? 2 : 1;
+                switch (i)
+                {
+                    case 0:
+                        profile.GunAimConeScale = 1f;
+                        break;
+                    case 1:
+                        profile.GunAimConeScale = 0.75f;
+                        break;
+                    case 2:
+                        profile.GunAimConeScale = 0.5f;
+                        break;
+                    default:
+                        profile.GunAimConeScale = 0.3f;
+                        break;
+                }
+            }
+        }
+
+        private static void ApplyResponseChainV10Defaults(
+            List<ResponseProfile> profiles)
+        {
+            float[] oldHealth = { 100000f, 250000f, 500000f, 1000000f };
+            float[] oldMainRotor = { 9000f, 22500f, 45000f, 90000f };
+            float[] oldTailRotor = { 5000f, 12500f, 25000f, 50000f };
+            float[] newHealth = { 50000f, 80000f, 125000f, 250000f };
+            float[] thresholds = { 50f, 65f, 75f, 85f };
+
+            for (int i = 0; i < profiles.Count && i < MaximumResponseLevels; i++)
+            {
+                ResponseProfile profile = profiles[i];
+                if (profile == null)
+                    continue;
+
+                // Only replace the previous shipped defaults. Deliberately
+                // customized health values remain untouched during migration.
+                if (Mathf.Approximately(profile.Health, oldHealth[i])
+                    && Mathf.Approximately(profile.MainRotorHealth, oldMainRotor[i])
+                    && Mathf.Approximately(profile.TailRotorHealth, oldTailRotor[i]))
+                {
+                    profile.Health = newHealth[i];
+                    profile.MainRotorHealth = newHealth[i] * 0.09f;
+                    profile.TailRotorHealth = newHealth[i] * 0.05f;
+                }
+                profile.CombatEscalationHealthRemainingPercent = thresholds[i];
+            }
+        }
+
+        private static void ApplyControlledBetaV12Defaults(
+            List<ResponseProfile> profiles)
+        {
+            float[] health = { 3000f, 6000f, 9000f, 12000f };
+            for (int i = 0; i < profiles.Count && i < health.Length; i++)
+            {
+                ResponseProfile profile = profiles[i];
+                if (profile == null)
+                    continue;
+
+                profile.Health = health[i];
+                profile.MainRotorHealth = health[i] * 0.09f;
+                profile.TailRotorHealth = health[i] * 0.05f;
+            }
+        }
+
         private sealed class PluginConfiguration
         {
             [JsonProperty("Configuration version")]
-            public int ConfigurationVersion = 5;
+            public int ConfigurationVersion = 12;
 
             [JsonProperty("Enabled")]
-            public bool Enabled = true;
+            public bool Enabled = false;
 
             [JsonProperty("Raid detection")]
             public RaidDetectionConfiguration RaidDetection = new RaidDetectionConfiguration();
@@ -2897,12 +4017,15 @@ namespace Oxide.Plugins
                     {
                         Level = 1,
                         Name = "Suppression",
-                        Health = 100000f,
-                        MainRotorHealth = 9000f,
-                        TailRotorHealth = 5000f,
+                        Health = 3000f,
+                        MainRotorHealth = 270f,
+                        TailRotorHealth = 150f,
+                        CombatEscalationHealthRemainingPercent = 50f,
+                        LootCratesOnDeath = 1,
                         BulletDamage = 20f,
                         BulletSpeed = 300,
                         BulletAccuracyPercent = 65f,
+                        GunAimConeScale = 1f,
                         MaximumTargetRange = 300f,
                         EnableRockets = true,
                         MaximumRocketsPerAttack = 3,
@@ -2914,57 +4037,72 @@ namespace Oxide.Plugins
                     {
                         Level = 2,
                         Name = "Escalation",
-                        Health = 250000f,
-                        MainRotorHealth = 22500f,
-                        TailRotorHealth = 12500f,
+                        Health = 6000f,
+                        MainRotorHealth = 540f,
+                        TailRotorHealth = 300f,
+                        CombatEscalationHealthRemainingPercent = 65f,
+                        LootCratesOnDeath = 1,
                         BulletDamage = 30f,
                         BulletSpeed = 350,
                         BulletAccuracyPercent = 75f,
+                        GunAimConeScale = 0.75f,
                         MaximumTargetRange = 320f,
                         EnableRockets = true,
-                        MaximumRocketsPerAttack = 6,
-                        RocketAttackCooldownSeconds = 25f,
+                        MaximumRocketsPerAttack = 12,
+                        SecondsBetweenRockets = 0.18f,
+                        RocketDamageScale = 1.25f,
+                        RocketAttackCooldownSeconds = 18f,
                         EnableNapalm = true,
-                        NapalmChancePercent = 20f
+                        NapalmChancePercent = 45f
                     },
                     new ResponseProfile
                     {
                         Level = 3,
                         Name = "Maximum Response",
-                        Health = 500000f,
-                        MainRotorHealth = 45000f,
-                        TailRotorHealth = 25000f,
+                        Health = 9000f,
+                        MainRotorHealth = 810f,
+                        TailRotorHealth = 450f,
+                        CombatEscalationHealthRemainingPercent = 75f,
+                        LootCratesOnDeath = 2,
                         BulletDamage = 40f,
                         BulletSpeed = 400,
                         BulletAccuracyPercent = 85f,
+                        GunAimConeScale = 0.5f,
                         MaximumTargetRange = 340f,
                         EnableRockets = true,
-                        MaximumRocketsPerAttack = 10,
-                        RocketAttackCooldownSeconds = 20f,
+                        MaximumRocketsPerAttack = 16,
+                        SecondsBetweenRockets = 0.16f,
+                        RocketDamageScale = 1.75f,
+                        RocketAttackCooldownSeconds = 14f,
                         EnableNapalm = true,
-                        NapalmChancePercent = 35f
+                        NapalmChancePercent = 65f
                     },
                     new ResponseProfile
                     {
                         Level = 4,
                         Name = "Final Response",
-                        Health = 1000000f,
-                        MainRotorHealth = 90000f,
-                        TailRotorHealth = 50000f,
+                        Health = 12000f,
+                        MainRotorHealth = 1080f,
+                        TailRotorHealth = 600f,
+                        CombatEscalationHealthRemainingPercent = 85f,
+                        LootCratesOnDeath = 3,
+                        EnableMultiHelicopterResponse = true,
+                        HelicopterCount = 2,
                         BulletDamage = 50f,
                         BulletSpeed = 450,
                         BulletAccuracyPercent = 92f,
+                        GunAimConeScale = 0.3f,
                         MaximumTargetRange = 350f,
                         GunFireRate = 0.1f,
                         BurstLengthSeconds = 4f,
                         SecondsBetweenBursts = 2f,
                         EnableRockets = true,
-                        MaximumRocketsPerAttack = 16,
-                        SecondsBetweenRockets = 0.2f,
-                        RocketDamageScale = 1.25f,
-                        RocketAttackCooldownSeconds = 15f,
+                        MaximumRocketsPerAttack = 20,
+                        SecondsBetweenRockets = 0.14f,
+                        RocketDamageScale = 2.5f,
+                        RocketAttackCooldownSeconds = 10f,
                         EnableNapalm = true,
-                        NapalmChancePercent = 50f
+                        NapalmChancePercent = 85f
                     }
                 };
             }
@@ -2987,8 +4125,11 @@ namespace Oxide.Plugins
             [JsonProperty("Merge nearby raid damage into the same event within meters")]
             public float MergeRadius = 125f;
 
-            [JsonProperty("Initial helicopter response delay seconds")]
-            public float InitialResponseDelaySeconds = 15f;
+            [JsonProperty("Initial helicopter response delay seconds (0 = instant)")]
+            public float InitialResponseDelaySeconds = 0f;
+
+            [JsonProperty("Seconds between defeated response rounds (0 = immediate)")]
+            public float SecondsBetweenResponseRounds = 5f;
 
             [JsonProperty("End event after no qualifying structure raid damage for seconds")]
             public float RaidInactivitySeconds = 300f;
@@ -2998,6 +4139,12 @@ namespace Oxide.Plugins
 
             [JsonProperty("Maximum concurrent raid zones")]
             public int MaximumConcurrentRaidZones = 2;
+
+            [JsonProperty("Exclude underground cave-base raids from helicopter responses")]
+            public bool ExcludeUndergroundCaveBases = true;
+
+            [JsonProperty("Minimum meters below terrain surface to classify an underground cave base")]
+            public float UndergroundDepthThresholdMeters = 8f;
 
             [JsonProperty("Ignore structure damage by players authorized on the Tool Cupboard")]
             public bool IgnoreToolCupboardAuthorizedDamage = true;
@@ -3071,6 +4218,9 @@ namespace Oxide.Plugins
             [JsonProperty("Raid activity measurement window seconds")]
             public float ActivityWindowSeconds = 60f;
 
+            [JsonProperty("Helicopter combat activity window seconds")]
+            public float HelicopterCombatActivityWindowSeconds = 30f;
+
             [JsonProperty("Stop attacking hostile structures after no raid damage for seconds")]
             public float StructurePressureSeconds = 30f;
 
@@ -3137,11 +4287,26 @@ namespace Oxide.Plugins
             [JsonProperty("Orbit radius around raid meters")]
             public float OrbitRadius = 75f;
 
+            [JsonProperty("Additional orbit spacing per extra helicopter meters")]
+            public float MultiHelicopterOrbitSpacing = 45f;
+
+            [JsonProperty("Attack timing stagger per extra helicopter seconds")]
+            public float MultiHelicopterAttackStaggerSeconds = 4f;
+
             [JsonProperty("Maximum patrol overshoot beyond danger zone meters")]
             public float MaximumPatrolOvershoot = 175f;
 
             [JsonProperty("Maximum lifetime for each helicopter seconds (0 = no limit)")]
             public float MaximumLifetimeSeconds;
+
+            [JsonProperty("Randomize destroyed helicopter crash destination")]
+            public bool RandomizeCrashDestination = true;
+
+            [JsonProperty("Minimum crash distance from raid meters")]
+            public float MinimumCrashDistanceFromRaid = 300f;
+
+            [JsonProperty("Maximum crash distance from raid meters")]
+            public float MaximumCrashDistanceFromRaid = 600f;
         }
 
         private sealed class MapMarkerConfiguration
@@ -3236,6 +4401,18 @@ namespace Oxide.Plugins
             [JsonProperty("Tail rotor health")]
             public float TailRotorHealth = 5000f;
 
+            [JsonProperty("Escalate rockets and napalm at remaining health percent")]
+            public float CombatEscalationHealthRemainingPercent = 50f;
+
+            [JsonProperty("Loot crates dropped when destroyed")]
+            public int LootCratesOnDeath = 1;
+
+            [JsonProperty("Enable multi-helicopter response")]
+            public bool EnableMultiHelicopterResponse;
+
+            [JsonProperty("Number of helicopters in this response (1-3)")]
+            public int HelicopterCount = 1;
+
             [JsonProperty("Bullet damage")]
             public float BulletDamage = 20f;
 
@@ -3244,6 +4421,9 @@ namespace Oxide.Plugins
 
             [JsonProperty("Bullet accuracy percent")]
             public float BulletAccuracyPercent = 45f;
+
+            [JsonProperty("Gun aim cone scale (lower = tighter physical spread)")]
+            public float GunAimConeScale = 1f;
 
             [JsonProperty("Gun fire rate seconds")]
             public float GunFireRate = 0.125f;
@@ -3291,9 +4471,14 @@ namespace Oxide.Plugins
                 Health = Mathf.Max(1000f, Health);
                 MainRotorHealth = Mathf.Max(1f, MainRotorHealth);
                 TailRotorHealth = Mathf.Max(1f, TailRotorHealth);
+                CombatEscalationHealthRemainingPercent = Mathf.Clamp(
+                    CombatEscalationHealthRemainingPercent, 1f, 100f);
+                LootCratesOnDeath = Mathf.Clamp(LootCratesOnDeath, 0, 12);
+                HelicopterCount = Mathf.Clamp(HelicopterCount, 1, 3);
                 BulletDamage = Mathf.Max(0f, BulletDamage);
                 BulletSpeed = Math.Max(1, BulletSpeed);
                 BulletAccuracyPercent = Mathf.Clamp(BulletAccuracyPercent, 0f, 100f);
+                GunAimConeScale = Mathf.Clamp(GunAimConeScale, 0.05f, 3f);
                 GunFireRate = Mathf.Max(0.05f, GunFireRate);
                 BurstLengthSeconds = Mathf.Max(0.1f, BurstLengthSeconds);
                 SecondsBetweenBursts = Mathf.Max(0.1f, SecondsBetweenBursts);
@@ -3305,6 +4490,50 @@ namespace Oxide.Plugins
                 RocketDamageScale = Mathf.Max(0f, RocketDamageScale);
                 RocketAttackCooldownSeconds = Mathf.Max(1f, RocketAttackCooldownSeconds);
                 NapalmChancePercent = Mathf.Clamp(NapalmChancePercent, 0f, 100f);
+            }
+
+            public int GetHelicopterCount()
+            {
+                return EnableMultiHelicopterResponse
+                    ? Mathf.Clamp(HelicopterCount, 1, 3) : 1;
+            }
+        }
+
+        #endregion
+
+        #region Harmony patches
+
+        private static class PatrolHelicopterDeathPatch
+        {
+            [HarmonyPostfix]
+            public static void Postfix(PatrolHelicopterAI __instance)
+            {
+                try
+                {
+                    Instance?.ApplyControlledCrashDestination(__instance);
+                }
+                catch (Exception exception)
+                {
+                    Instance?.PrintError("Unable to assign a randomized crash destination: "
+                        + exception.Message);
+                }
+            }
+        }
+
+        private static class PatrolHelicopterFireGunPatch
+        {
+            [HarmonyPrefix]
+            public static void Prefix(PatrolHelicopterAI __instance, ref float aimCone)
+            {
+                try
+                {
+                    Instance?.ApplyGunAimConeScale(__instance, ref aimCone);
+                }
+                catch (Exception exception)
+                {
+                    Instance?.PrintError("Unable to apply helicopter aim scaling: "
+                        + exception.Message);
+                }
             }
         }
 
@@ -3318,6 +4547,10 @@ namespace Oxide.Plugins
             public float CreatedAt;
             public float LastRaidDamageAt;
             public double LastRaidDamageUtc;
+            public float LastCombatActivityAt;
+            public double EscalationDueUtc;
+            public float LastHelicopterDamageAt = float.MinValue;
+            public float LowestHelicopterHealthFraction = 1f;
             public float QualificationWindowStartedAt;
             public int QualifyingHits;
             public float QualifyingDamage;
@@ -3328,12 +4561,20 @@ namespace Oxide.Plugins
             public bool PausedForInactivity;
             public bool ResponseCompleted;
             public PatrolHelicopter Helicopter;
+            public readonly List<PatrolHelicopter> Helicopters =
+                new List<PatrolHelicopter>();
+            public readonly HashSet<PatrolHelicopter> HelicoptersReachedZone =
+                new HashSet<PatrolHelicopter>();
+            public readonly Dictionary<PatrolHelicopter, int> HelicopterUnitIndexes =
+                new Dictionary<PatrolHelicopter, int>();
             public float HelicopterSpawnedAt;
-            public bool HelicopterReachedZone;
             public bool SuppressReplacement;
             public float SavedHelicopterHealth;
             public float SavedMainRotorHealth;
             public float SavedTailRotorHealth;
+            public readonly List<HelicopterHealthState> SavedHelicopters =
+                new List<HelicopterHealthState>();
+            public Vector3 CrashDestination;
             public Vector3 ApprovedStructureStrafePosition;
             public float ApprovedStructureStrafeUntil;
             public Timer SpawnTimer;
@@ -3358,6 +4599,49 @@ namespace Oxide.Plugins
                     : null;
             }
 
+            public void PruneDestroyedHelicopters()
+            {
+                for (int i = Helicopters.Count - 1; i >= 0; i--)
+                {
+                    PatrolHelicopter helicopter = Helicopters[i];
+                    if (helicopter != null && !helicopter.IsDestroyed)
+                        continue;
+                    HelicoptersReachedZone.Remove(helicopter);
+                    HelicopterUnitIndexes.Remove(helicopter);
+                    Helicopters.RemoveAt(i);
+                }
+
+                Helicopter = Helicopters.Count > 0 ? Helicopters[0] : null;
+            }
+
+            public int GetHelicopterUnitIndex(PatrolHelicopter helicopter)
+            {
+                int unitIndex;
+                return helicopter != null
+                    && HelicopterUnitIndexes.TryGetValue(helicopter, out unitIndex)
+                    ? unitIndex : 0;
+            }
+
+            public List<HelicopterHealthState> ConsumeSavedHelicopterStates()
+            {
+                var states = new List<HelicopterHealthState>(SavedHelicopters);
+                if (states.Count == 0 && SavedHelicopterHealth > 0f)
+                {
+                    states.Add(new HelicopterHealthState
+                    {
+                        Health = SavedHelicopterHealth,
+                        MainRotorHealth = SavedMainRotorHealth,
+                        TailRotorHealth = SavedTailRotorHealth
+                    });
+                }
+
+                SavedHelicopters.Clear();
+                SavedHelicopterHealth = 0f;
+                SavedMainRotorHealth = 0f;
+                SavedTailRotorHealth = 0f;
+                return states;
+            }
+
             public void RecordAggressor(ulong userId, float time)
             {
                 if (!userId.IsSteamId())
@@ -3375,6 +4659,55 @@ namespace Oxide.Plugins
                 }
 
                 record.LastHostileAt = time;
+            }
+
+            public void RecordRaidAggression(ulong userId, float damage, float time)
+            {
+                HostilityRecord record;
+                if (!_aggressors.TryGetValue(userId, out record))
+                {
+                    record = new HostilityRecord { LastNoticeStage = 4 };
+                    _aggressors[userId] = record;
+                }
+
+                record.LastRaidDamageAt = time;
+                record.RecentRaidDamage += Mathf.Max(0f, damage);
+            }
+
+            public void RecordHelicopterDamage(ulong userId, float damage,
+                float healthFraction, float time, float activityWindow)
+            {
+                HostilityRecord record;
+                if (!_aggressors.TryGetValue(userId, out record))
+                {
+                    record = new HostilityRecord { LastNoticeStage = 4 };
+                    _aggressors[userId] = record;
+                }
+
+                if (time - record.LastHelicopterDamageAt > activityWindow)
+                    record.RecentHelicopterDamage = 0f;
+                record.LastHelicopterDamageAt = time;
+                record.RecentHelicopterDamage += Mathf.Max(0f, damage);
+                LastHelicopterDamageAt = time;
+                LowestHelicopterHealthFraction = Mathf.Min(
+                    LowestHelicopterHealthFraction, Mathf.Clamp01(healthFraction));
+            }
+
+            public float GetThreatScore(ulong userId, float time,
+                float raidActivityWindow, float helicopterActivityWindow)
+            {
+                HostilityRecord record;
+                if (!_aggressors.TryGetValue(userId, out record))
+                    return 0f;
+
+                float score = 0f;
+                if (time - record.LastRaidDamageAt <= raidActivityWindow)
+                    score += 2500f + record.RecentRaidDamage * 4f;
+                if (time - record.LastHelicopterDamageAt <= helicopterActivityWindow)
+                    score += 1800f + record.RecentHelicopterDamage * 3f;
+                score += Mathf.Max(0f, helicopterActivityWindow
+                    - (time - record.LastHostileAt)) * 10f;
+                return score;
             }
 
             public bool IsRecentAggressor(ulong userId, float oldestAllowedTime)
@@ -3405,6 +4738,11 @@ namespace Oxide.Plugins
                 _aggressors.Remove(userId);
             }
 
+            public void ClearHostilityRecords()
+            {
+                _aggressors.Clear();
+            }
+
             public void RecordRaidDamage(float time, float windowSeconds)
             {
                 _recentRaidDamage.Add(time);
@@ -3432,6 +4770,22 @@ namespace Oxide.Plugins
         {
             public float LastHostileAt;
             public int LastNoticeStage;
+            public float LastRaidDamageAt = float.MinValue;
+            public float RecentRaidDamage;
+            public float LastHelicopterDamageAt = float.MinValue;
+            public float RecentHelicopterDamage;
+        }
+
+        private sealed class HelicopterHealthState
+        {
+            [JsonProperty("Health")]
+            public float Health;
+
+            [JsonProperty("Main rotor health")]
+            public float MainRotorHealth;
+
+            [JsonProperty("Tail rotor health")]
+            public float TailRotorHealth;
         }
 
         private sealed class RaidProgressData
@@ -3455,6 +4809,9 @@ namespace Oxide.Plugins
             [JsonProperty("Waiting for renewed raid damage")]
             public bool AwaitingRenewedRaidDamage;
 
+            [JsonProperty("Escalation due UTC")]
+            public double EscalationDueUtc;
+
             [JsonProperty("All response helicopters defeated")]
             public bool ResponseCompleted;
 
@@ -3466,6 +4823,10 @@ namespace Oxide.Plugins
 
             [JsonProperty("Saved tail rotor health")]
             public float SavedTailRotorHealth;
+
+            [JsonProperty("Saved helicopter group health")]
+            public List<HelicopterHealthState> SavedHelicopters =
+                new List<HelicopterHealthState>();
 
             [JsonProperty("Victim owner IDs")]
             public List<ulong> VictimOwnerIds = new List<ulong>();

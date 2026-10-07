@@ -1,5 +1,117 @@
 # Changelog
 
+## 0.6.0 - 2026-10-06
+
+- Added persistent controlled-test activation: `/antiraidhelistart` enables automatic raid protection until an administrator disables it, including across reloads and restarts.
+- Added `/antiraidstop` to disable automatic protection and clean all active helicopters, pending rounds, map markers, hostility indicators, and saved raid progress. `/antiraidhelistop` remains as a compatibility alias.
+- Repurposed `antiraidheli.start` and `antiraidheli.stop` console commands for the same persistent enable/disable behavior, and added `antiraidheli.test [level]` for manual console test responses.
+- Changed fresh installations and one-time upgrades to begin disabled so the beta cannot start responding to live raids before an administrator explicitly enables it.
+- Promoted the TEST server's controlled-testing health ladder to the v0.6.0 defaults: 3,000 / 6,000 / 9,000 / 12,000 fuselage health, with matching 9% main-rotor and 5% tail-rotor health.
+- Disabled startup restoration of stale raid progress while the system is inactive and clear that saved progress, preventing an old response chain from returning when controlled testing is later enabled.
+- Added configuration migration version 12 for persistent manual activation and the controlled beta health defaults.
+
+## 0.5.1 - 2026-10-05
+
+- Added cave-base safety: underground victim structures are excluded from automatic AntiRaidHeli responses by default because helicopters cannot reliably reach, see, or pressure raiders beneath terrain.
+- Cave classification compares both the damaged structure and its connected Tool Cupboard against Rust's terrain surface, covering cave entrances whose outer pieces may be shallower than the protected base core.
+- Added a configurable underground depth threshold, defaulting to eight metres, plus an enable/disable switch for servers that deliberately want cave raids protected.
+- Kept administrator-created test incidents available underground so controlled diagnostics are still possible.
+- Added configuration migration version 11 for the cave-base exclusion settings.
+
+## 0.5.0 - 2026-10-05
+
+- Rebalanced the production health ladder to 50,000 / 80,000 / 125,000 / 250,000 health across rounds 1–4; both final-round helicopters receive the full 250,000 health.
+- Kept fuselage and rotor health configurable per response profile, with migration that replaces only the prior shipped defaults and preserves deliberate administrator customizations.
+- Changed successful helicopter destruction into continued aggression: the next response round now deploys after a configurable five-second delay instead of waiting for more structural damage.
+- Added helicopter-combat pressure. Sustained attacks on the response helicopter can trigger heavy rocket and napalm pressure at configurable remaining-health thresholds of 50% / 65% / 75% / 85% for rounds 1–4.
+- Added shared threat scoring across raiders, defenders, and third parties who attack the helicopter, with split target assignment for multi-helicopter responses.
+- Kept one four-round response chain per defended victim base, preventing separate teams from multiplying helicopter incidents in the same hotspot.
+- Added active-response repair, upgrade, and attached-expansion blocking for identified aggressor raid bases, including BetterTC Repair All through its `OnStructureRepair` integration.
+- Added optional NoEscape raid-block refresh when a confirmed raider attacks a response helicopter, closing repair gaps during extended fights and across respawns.
+- Preserved heli hostility through player death and restored the HUD after respawn until the normal three-minute non-aggression timer expires.
+- Armed non-raiders who are actually acquired as vanilla-style helicopter threats now receive the same visible hostility timer.
+- Added a small `ROUND` caption to the HUD. The displayed round and map-marker level remain on the completed round during the inter-round delay, then advance when the next response actually deploys.
+- Persisted pending escalation timing across plugin reloads and server restarts.
+- Added configuration migration version 10 for response delay, combat-pressure windows, health thresholds, and the revised default health ladder.
+
+## 0.4.3 - 2026-10-05
+
+- Added persistent entity tags to newly created AntiRaidHeli label and radius map markers.
+- Added reload-safe orphan cleanup during plugin initialization and after `/antiraidhelistop` or `antiraidheli.stop` removes the final incident.
+- Added backward-compatible discovery of untagged legacy radius markers by pairing them with an AntiRaidHeli label at the same map position.
+- Stale event markers from older reloads can now be removed without manually locating or killing their entities.
+
+## 0.4.2 - 2026-10-05
+
+- Added a compact current/total response indicator to the hostility HUD, such as `1/4` through `4/4`, immediately left of the countdown timer.
+- The indicator follows the newest active hostility record when a player is involved in overlapping raid incidents.
+- Rebalanced the HUD label widths to keep the helicopter icon, status, round indicator, and countdown readable without enlarging the panel.
+
+## 0.4.1 - 2026-10-05
+
+- Added explicit multi-helicopter flight deconfliction with separate concentric orbit lanes for each helicopter.
+- Added configurable orbit spacing, defaulting to 45 metres per additional helicopter.
+- Added configurable attack-timing staggering, defaulting to four seconds per additional helicopter, so rocket and strafe passes do not begin in lockstep.
+- Retained 70-metre approach-formation spacing and independent randomized crash destinations.
+- Added configuration migration version 9 for the new flight-separation controls.
+
+## 0.4.0 - 2026-10-05
+
+- Added configurable multi-helicopter response groups with a hard safety limit of three helicopters per response level.
+- Enabled a two-helicopter Final Response by default. Both helicopters retain the complete level-four weapons profile and independently drop three crates, for six crates if the raiders defeat the full final group.
+- Changed escalation and final victory handling so a response group is not defeated until every helicopter in that group is destroyed.
+- Added independent formation spacing, movement, targeting, rocket pressure, cleanup, randomized crash destinations, and inactivity retirement for every helicopter in a group.
+- Persisted each group member's fuselage and rotor health across inactivity, plugin reloads, and server restarts.
+- Added true per-response physical gun-spread scaling without modifying vanilla or other plugin helicopters: 1.00/0.75/0.50/0.30 aim-cone scales for levels 1–4.
+- Added configuration migration version 8 so existing installations receive the two-helicopter final response and aim defaults without rebuilding their configuration.
+
+## 0.3.9 - 2026-10-05
+
+- Replaced Rust's monument-biased death-flight choice for AntiRaidHeli helicopters with a per-helicopter randomized dry-land crash destination.
+- Added configurable minimum and maximum crash distances from the defended raid, defaulting to a 300–600 metre ring.
+- Added randomized area-uniform selection plus a coastal fallback sweep, so nearby valid land is still found without repeatedly favoring the same direction.
+- Scoped the death-flight patch exclusively to AntiRaidHeli-managed helicopters; vanilla and other plugin helicopters retain their normal crash behavior.
+- Added configuration migration version 7 for the new crash-destination controls without requiring config deletion.
+
+## 0.3.8 - 2026-10-05
+
+- Fixed legacy persisted `EscalationAlert` language templates throwing a `FormatException` during helicopter death and interrupting response-transition cleanup.
+- Added fresh message keys for the revised escalation-standby and final-victory announcements so existing installations receive the current wording without deleting their language file.
+- Hardened all chat-message formatting so an incompatible customized or stale language template logs one warning instead of breaking event logic.
+
+## 0.3.7 - 2026-10-05
+
+- Darkened the embedded helicopter silhouette on the hostility indicator for clearer contrast against the red panel and closer visual alignment with NoEscape's Raid Block icon.
+- Bound earned final-response clearance to the exact connected Rust building ID whenever one is available.
+- A separately constructed base now starts a fresh four-helicopter response chain even when it belongs to the same victim and is near a previously cleared raid; owner matching remains only as a fallback for standalone deployables without a building ID.
+
+## 0.3.6 - 2026-10-05
+
+- Fixed continued structural damage after defeating the fourth helicopter recreating `HELI HOSTILE` even though the raiding party had earned clearance.
+- Completed response chains now refresh their earned raid clearance without recording new heli hostility or attempting to deploy a nonexistent fifth response level.
+
+## 0.3.5 - 2026-10-05
+
+- Changed helicopter loot progression to 1/1/2/3 crates across response levels 1–4, limiting a fully defeated chain to seven crates instead of sixteen.
+- Removed raid-hostile records and the `HELI HOSTILE` indicator immediately when the fourth and final helicopter is defeated.
+- Expanded the final victory announcement with: “You may raid in peace now—you earned it.”
+- Fixed hidden aggressors remaining in the native target list preventing repeated shelter-pressure passes; active raiders inside confirmed raid bases can now be strafed even while the helicopter still remembers them as a target.
+- Increased response levels 2–4 to 12/16/20 base rockets per pass, shortened their base pass cooldowns to 18/14/10 seconds, and increased their napalm chances to 45/65/85 percent.
+- Increased level 2–4 rocket damage scales to 1.25/1.75/2.5 and tightened their intra-volley rocket timing, while retaining activity-based scaling for sustained and heavy raids.
+- Added configuration migration version 6 so existing installations receive the revised escalation and loot defaults without rebuilding their configuration.
+
+## 0.3.4 - 2026-10-05
+
+- Changed the default initial helicopter response delay from 15 seconds to immediate deployment. The helicopter still stages 300 meters from the raid and must fly into the response zone, giving raiders only its approach time to react.
+- Retained the response-delay setting so server owners can deliberately restore a delay if desired, with the config label explicitly documenting that `0` means instant and positive values are seconds.
+- Added automatic repair for configs affected by legacy response-profile duplication, trimming excess entries back to the intended four escalation levels.
+- Added a second legacy repair for configs whose surviving four entries were all copies of the level-one profile, restoring the intended behavior and armament for levels 2–4.
+
+## 0.3.3 - 2026-10-05
+
+- Fixed `/antiraidhelistop` and `antiraidheli.stop` leaving a stale `HELI HOSTILE` countdown on some players after stopping multiple or overlapping incidents.
+- Batch cleanup now explicitly removes the AntiRaidHeli hostility panel from every connected player after all incidents have ended.
+
 ## 0.3.2 - 2026-10-05
 
 - Added a compact front-facing attack-helicopter image to the `HELI HOSTILE` indicator, using the same 13%-wide icon slot and dark-red visual treatment as NoEscape's raid-block icon.
