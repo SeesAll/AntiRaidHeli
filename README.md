@@ -2,14 +2,14 @@
 
 AntiRaidHeli detects active player base raids and deploys escalating patrol helicopters over the raid zone. Armed players inside the marked danger area receive vanilla-style helicopter treatment, while confirmed raid aggressors face persistent suppression and attacks against their raid base. Destroying a helicopter earns its normal wreckage and loot, but also triggers the next response round after a short configurable delay.
 
-Version 0.6.0 is a controlled public-test build. Automatic raid detection is disabled after installation or upgrade until an administrator runs `/antiraidhelistart`. That choice is saved across reloads and restarts. `/antiraidstop` disables protection again and immediately cleans every active AntiRaidHeli event, marker, timer, and hostility state.
+Version 0.6.2 remains administrator-controlled while live balancing continues. Automatic raid detection is disabled after installation or upgrade until an administrator runs `/antiraidhelistart`. That choice is saved across reloads and restarts. `/antiraidstop` disables protection again and immediately cleans every active AntiRaidHeli event, marker, timer, and hostility state.
 
 ## Current response sequence
 
-1. **Suppression** — 3,000 health, machine guns, light rocket/napalm pressure, and one loot crate.
-2. **Escalation** — 6,000 health, 12 base rockets per pass, 45% base napalm chance, and one loot crate.
-3. **Maximum Response** — 9,000 health, 16 base rockets per pass, 65% base napalm chance, and two loot crates.
-4. **Final Response** — two helicopters with 12,000 health each, 20 base rockets per pass, 85% base napalm chance, and three loot crates per helicopter. This level targets only recently aggressive players.
+1. **Suppression** — 30,000 health, machine guns, light rocket/napalm pressure, and one loot crate.
+2. **Escalation** — 50,000 health, 12 base rockets per pass, 45% base napalm chance, and one loot crate.
+3. **Maximum Response** — 80,000 health, 16 base rockets per pass, 65% base napalm chance, and two loot crates.
+4. **Final Response** — two helicopters with 120,000 health each, 20 base rockets per pass, 85% base napalm chance, and three loot crates per helicopter. This level targets only recently aggressive players.
 
 All health, rotor health, gun, rocket, napalm, timing, targeting, marker, and announcement settings are configurable.
 
@@ -27,7 +27,7 @@ The configurable helicopter spawn mode supports `NearbyLand` for a short land-ba
 
 ## Raid detection
 
-The plugin has no required dependencies. It directly observes player damage to another player's building blocks, doors, simple building blocks, and tool cupboards. A raid must reach the configured accumulated-damage threshold plus either the configured hit count or the heavy single-hit threshold inside the qualification window. This allows genuine explosive raids to qualify quickly without summoning a helicopter for a couple of stray rifle rounds.
+The plugin has no required dependencies. It directly observes player damage to another player's building blocks, doors, simple building blocks, tool cupboards, and current player-built boat structures. Vehicle privilege authorization is respected for boat raids. A raid must reach the configured accumulated-damage threshold plus either the configured hit count or the heavy single-hit threshold inside the qualification window. This allows genuine explosive raids to qualify quickly without summoning a helicopter for a couple of stray rifle rounds.
 
 Underground cave bases are excluded from automatic helicopter responses by default. The plugin compares both the damaged structure and its connected Tool Cupboard with Rust's terrain surface; a configurable eight-metre depth threshold identifies a cave base without treating ordinary foundations and shallow bunkers as underground. Cave raids therefore remain open game instead of creating unreachable helicopters, terrain-blocked attacks, or endless patrol behavior. Administrators can disable this exclusion or change the threshold, and explicit administrator test events remain available underground.
 
@@ -62,7 +62,7 @@ Direct aggressor, native team, clan, friend, and Tool Cupboard associations do n
 
 ## Escalation
 
-When a helicopter is destroyed, it selects a randomized dry-land crash destination 300–600 metres from the defended raid by default instead of repeatedly favoring the nearest monument. This creates a deliberate choice between continuing the raid and leaving to contest the helicopter loot. The distance ring and the feature itself are configurable, and the behavior applies only to AntiRaidHeli helicopters. Loot scales at 1/1/2 crates across the first three levels. The default Final Response deploys two full-strength helicopters, each dropping three crates; the final round is not defeated until both are destroyed. Multi-helicopter mode and its one-to-three-helicopter count are configurable per response profile. Destroying the current group starts the next round after five seconds by default; the HUD and marker continue to show the completed round until deployment. Inactivity pauses rather than defeats the current helicopter group, preserving every fuselage and rotor's health for the resumed response. After all configured levels are defeated, the original raiding party earns clearance for that continuing raid against that exact connected building until its response memory expires, and its hostility indicator is removed immediately. Attacking another separately constructed base begins a fresh response chain, including when the other base belongs to the same victim.
+When a helicopter is destroyed, it selects a randomized crash destination 50–300 metres from the defended raid by default instead of repeatedly favoring the nearest monument. Selection prefers dry land, then configurable shallow water, and can fall back to deeper water when an offshore raid has no valid nearby shore. This keeps boat and ocean-base responses from becoming stuck without changing vanilla or other-plugin helicopters. Loot scales at 1/1/2 crates across the first three levels. The default Final Response deploys two full-strength helicopters, each dropping three crates; the final round is not defeated until both are destroyed. Multi-helicopter mode and its one-to-three-helicopter count are configurable per response profile. Destroying the current group starts the next round after five seconds by default; the HUD and marker continue to show the completed round until deployment. Inactivity pauses rather than defeats the current helicopter group, preserving every fuselage and rotor's health for the resumed response. After all configured levels are defeated, the original raiding party earns clearance for that continuing raid against that exact connected building or protected player-built boat until its response memory expires, and its hostility indicator is removed immediately. Attacking another separately constructed property begins a fresh response chain, including when it belongs to the same victim.
 
 While a response chain is active, identified aggressor raid bases cannot be repaired, upgraded, or expanded from an attached building piece. The repair hook also blocks BetterTC's Repair All operation. If NoEscape is installed, confirmed raiders who attack the response helicopter have their raid block refreshed so an extended air fight or respawn cannot create an unintended repair window.
 

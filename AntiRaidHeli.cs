@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Reflection;
+using System.Text;
 using HarmonyLib;
 using Newtonsoft.Json;
 using Oxide.Core;
@@ -12,7 +13,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("AntiRaidHeli", "SeesAll", "0.6.1")]
+    [Info("AntiRaidHeli", "SeesAll", "0.6.2")]
     [Description("Deploys escalating patrol helicopters over active player raids.")]
     public class AntiRaidHeli : RustPlugin
     {
@@ -55,6 +56,9 @@ namespace Oxide.Plugins
         private readonly List<RaidIncident> _incidents = new List<RaidIncident>();
         private readonly HashSet<PatrolHelicopter> _retiringHelicopters =
             new HashSet<PatrolHelicopter>();
+        private readonly Dictionary<PatrolHelicopter, HelicopterHealthTelemetry>
+            _helicopterHealthTelemetry =
+                new Dictionary<PatrolHelicopter, HelicopterHealthTelemetry>();
         private readonly Dictionary<ulong, float> _repairLockNoticeAt =
             new Dictionary<ulong, float>();
         private readonly Dictionary<uint, RecentConstructionRecord> _recentConstruction =
@@ -127,6 +131,7 @@ namespace Oxide.Plugins
                     helicopter.Kill();
             }
             _retiringHelicopters.Clear();
+            _helicopterHealthTelemetry.Clear();
             Instance = null;
         }
 
@@ -384,6 +389,9 @@ namespace Oxide.Plugins
                 PatrolHelicopter damagedHelicopter = entity as PatrolHelicopter;
                 RaidIncident incident = FindIncident(damagedHelicopter);
                 BasePlayer helicopterAttacker = ResolveAttackingPlayer(info);
+                if (incident != null && helicopterAttacker != null)
+                    QueueHelicopterDamageTelemetry(incident, damagedHelicopter,
+                        Mathf.Max(0f, info.damageTypes.Total()));
                 if (incident != null && helicopterAttacker != null
                     && IsInsideDangerZone(incident, helicopterAttacker.transform.position))
                 {
@@ -416,7 +424,8 @@ namespace Oxide.Plugins
                 return null;
             }
 
-            if (!IsQualifyingRaidStructure(entity) || !entity.OwnerID.IsSteamId())
+            if (!IsQualifyingRaidStructure(entity)
+                || !HasPlayerOwnershipOrAuthorization(entity))
                 return null;
 
             BasePlayer attacker = ResolveAttackingPlayer(info);
@@ -448,7 +457,8 @@ namespace Oxide.Plugins
                 return false;
 
             uint buildingId = GetBuildingId(target);
-            if (buildingId == 0)
+            ulong boatId = GetBoatId(target);
+            if (buildingId == 0 && boatId == 0UL)
                 return false;
 
             float now = Time.realtimeSinceStartup;
@@ -456,7 +466,9 @@ namespace Oxide.Plugins
             {
                 RaidIncident incident = _incidents[i];
                 if (incident == null || !incident.IsAdminTest || !incident.Qualified
-                    || !incident.ProtectedBuildingIds.Contains(buildingId)
+                    || (buildingId != 0
+                        ? !incident.ProtectedBuildingIds.Contains(buildingId)
+                        : !incident.ProtectedBoatIds.Contains(boatId))
                     || !IsAggressorOwner(incident, attacker.userID))
                     continue;
 
@@ -618,7 +630,8 @@ namespace Oxide.Plugins
         private static bool IsQualifyingRaidStructure(BaseCombatEntity entity)
         {
             return entity is BuildingBlock || entity is Door || entity is SimpleBuildingBlock
-                || entity is BuildingPrivlidge;
+                || entity is BuildingPrivlidge || entity is BoatBuildingBlock
+                || entity is PlayerBoat || entity is Tugboat || GetBoatId(entity) != 0UL;
         }
 
         private bool IsExcludedUndergroundRaid(BaseCombatEntity target)
@@ -649,8 +662,16 @@ namespace Oxide.Plugins
 
         private bool IsFriendlyStructureDamage(BasePlayer attacker, BaseCombatEntity entity)
         {
-            ulong ownerId = entity?.OwnerID ?? 0UL;
-            if (attacker == null || !ownerId.IsSteamId())
+            if (attacker == null || entity == null)
+                return false;
+
+            VehiclePrivilege vehiclePrivilege = GetVehiclePrivilege(entity);
+            if (_config.RaidDetection.IgnoreToolCupboardAuthorizedDamage
+                && vehiclePrivilege?.IsAuthed(attacker) == true)
+                return true;
+
+            ulong ownerId = GetPrimaryPropertyOwnerId(entity, vehiclePrivilege);
+            if (!ownerId.IsSteamId())
                 return false;
 
             if (attacker.userID == ownerId)
@@ -793,8 +814,16 @@ namespace Oxide.Plugins
                 return false;
 
             uint buildingId = GetBuildingId(target);
+            if (buildingId != 0
+                && incident.ProtectedBuildingIds.Contains(buildingId))
+                return true;
+
+            ulong boatId = GetBoatId(target);
+            if (boatId != 0UL)
+                return incident.ProtectedBoatIds.Contains(boatId);
+
             if (buildingId != 0)
-                return incident.ProtectedBuildingIds.Contains(buildingId);
+                return false;
 
             // Owner matching is only a fallback for standalone deployables that
             // Rust cannot associate with a connected building. A separately
@@ -870,6 +899,27 @@ namespace Oxide.Plugins
             if (buildingId != 0)
                 incident.ProtectedBuildingIds.Add(buildingId);
 
+            BaseEntity boat = GetBoatRoot(target);
+            if (boat != null)
+            {
+                incident.ProtectedBoat = boat;
+                ulong boatId = GetBoatId(boat);
+                if (boatId != 0UL)
+                    incident.ProtectedBoatIds.Add(boatId);
+                if (boat.OwnerID.IsSteamId())
+                    incident.VictimOwnerIds.Add(boat.OwnerID);
+
+                VehiclePrivilege vehiclePrivilege = GetVehiclePrivilege(boat);
+                if (vehiclePrivilege?.authorizedPlayers != null)
+                {
+                    foreach (ulong authorizedId in vehiclePrivilege.authorizedPlayers)
+                    {
+                        if (authorizedId.IsSteamId())
+                            incident.VictimOwnerIds.Add(authorizedId);
+                    }
+                }
+            }
+
             BuildingPrivlidge privilege = target as BuildingPrivlidge
                 ?? target.GetBuildingPrivilege();
             if (privilege == null || privilege.authorizedPlayers == null)
@@ -927,7 +977,8 @@ namespace Oxide.Plugins
                 return false;
 
             return entity.OwnerID.IsSteamId() || GetBuildingId(entity) != 0
-                || entity.GetBuildingPrivilege() != null;
+                || entity.GetBuildingPrivilege() != null || GetBoatId(entity) != 0UL
+                || GetVehiclePrivilege(entity) != null;
         }
 
         private bool CanHelicopterDamageAsset(RaidIncident incident,
@@ -944,9 +995,17 @@ namespace Oxide.Plugins
             if (buildingId != 0 && incident.ProtectedBuildingIds.Contains(buildingId))
                 return false;
 
+            ulong boatId = GetBoatId(entity);
+            if (boatId != 0UL && incident.ProtectedBoatIds.Contains(boatId))
+                return false;
+
             BuildingPrivlidge privilege = entity as BuildingPrivlidge
                 ?? entity.GetBuildingPrivilege();
             if (IsAggressorAuthorized(incident, privilege))
+                return true;
+
+            VehiclePrivilege vehiclePrivilege = GetVehiclePrivilege(entity);
+            if (IsAggressorAuthorized(incident, vehiclePrivilege))
                 return true;
 
             if (ownerId.IsSteamId() && IsAggressorOwner(incident, ownerId))
@@ -963,6 +1022,22 @@ namespace Oxide.Plugins
 
         private bool IsAggressorAuthorized(RaidIncident incident,
             BuildingPrivlidge privilege)
+        {
+            if (incident == null || privilege?.authorizedPlayers == null)
+                return false;
+
+            foreach (ulong authorizedId in privilege.authorizedPlayers)
+            {
+                if (authorizedId.IsSteamId()
+                    && IsAggressorOwner(incident, authorizedId))
+                    return true;
+            }
+
+            return false;
+        }
+
+        private bool IsAggressorAuthorized(RaidIncident incident,
+            VehiclePrivilege privilege)
         {
             if (incident == null || privilege?.authorizedPlayers == null)
                 return false;
@@ -1050,6 +1125,94 @@ namespace Oxide.Plugins
 
             BuildingPrivlidge privilege = entity?.GetBuildingPrivilege();
             return privilege?.buildingID ?? 0U;
+        }
+
+        private static BaseEntity GetBoatRoot(BaseEntity entity)
+        {
+            for (int depth = 0; entity != null && depth < 12; depth++)
+            {
+                if (entity is PlayerBoat || entity is Tugboat)
+                    return entity;
+
+                entity = entity.GetParentEntity();
+            }
+
+            return null;
+        }
+
+        private static ulong GetBoatId(BaseEntity entity)
+        {
+            BaseEntity boat = GetBoatRoot(entity);
+            return boat?.net == null ? 0UL : boat.net.ID.Value;
+        }
+
+        private static VehiclePrivilege GetVehiclePrivilege(BaseEntity entity)
+        {
+            VehiclePrivilege directPrivilege = entity as VehiclePrivilege;
+            if (directPrivilege != null)
+                return directPrivilege;
+
+            BaseEntity boat = GetBoatRoot(entity);
+            if (boat?.children == null)
+                return null;
+
+            for (int i = 0; i < boat.children.Count; i++)
+            {
+                BaseEntity child = boat.children[i];
+                VehiclePrivilege privilege = child as VehiclePrivilege;
+                if (privilege != null)
+                    return privilege;
+
+                SteeringWheel steering = child as SteeringWheel;
+                if (steering?.Privilege != null)
+                    return steering.Privilege;
+            }
+
+            return null;
+        }
+
+        private static bool HasPlayerOwnershipOrAuthorization(BaseEntity entity)
+        {
+            if (entity == null)
+                return false;
+            if (entity.OwnerID.IsSteamId())
+                return true;
+
+            BaseEntity boat = GetBoatRoot(entity);
+            if (boat != null && boat.OwnerID.IsSteamId())
+                return true;
+
+            VehiclePrivilege privilege = GetVehiclePrivilege(entity);
+            if (privilege?.authorizedPlayers == null)
+                return false;
+            foreach (ulong authorizedId in privilege.authorizedPlayers)
+                if (authorizedId.IsSteamId())
+                    return true;
+
+            return false;
+        }
+
+        private static ulong GetPrimaryPropertyOwnerId(BaseEntity entity,
+            VehiclePrivilege vehiclePrivilege = null)
+        {
+            if (entity == null)
+                return 0UL;
+            if (entity.OwnerID.IsSteamId())
+                return entity.OwnerID;
+
+            BaseEntity boat = GetBoatRoot(entity);
+            if (boat != null && boat.OwnerID.IsSteamId())
+                return boat.OwnerID;
+
+            vehiclePrivilege = vehiclePrivilege ?? GetVehiclePrivilege(entity);
+            if (vehiclePrivilege?.authorizedPlayers != null)
+            {
+                foreach (ulong authorizedId in vehiclePrivilege.authorizedPlayers)
+                    if (authorizedId.IsSteamId())
+                        return authorizedId;
+            }
+
+            return 0UL;
         }
 
         private void OnEntityBuilt(Planner planner, GameObject gameObject)
@@ -1310,6 +1473,8 @@ namespace Oxide.Plugins
                         ?? new List<ulong>());
                     incident.ProtectedBuildingIds.UnionWith(record.ProtectedBuildingIds
                         ?? new List<uint>());
+                    incident.ProtectedBoatIds.UnionWith(record.ProtectedBoatIds
+                        ?? new List<ulong>());
                     incident.HostileBuildingIds.UnionWith(record.HostileBuildingIds
                         ?? new List<uint>());
                     _incidents.Add(incident);
@@ -1401,6 +1566,7 @@ namespace Oxide.Plugins
                         VictimOwnerIds = new List<ulong>(incident.VictimOwnerIds),
                         AggressorOwnerIds = new List<ulong>(incident.AggressorOwnerIds),
                         ProtectedBuildingIds = new List<uint>(incident.ProtectedBuildingIds),
+                        ProtectedBoatIds = new List<ulong>(incident.ProtectedBoatIds),
                         HostileBuildingIds = new List<uint>(incident.HostileBuildingIds)
                     });
                 }
@@ -1614,12 +1780,15 @@ namespace Oxide.Plugins
                 return;
 
             Vector3 crashDestination;
-            if (!TryFindRandomDryLandInRing(incident.Center,
+            CrashSurfaceType crashSurface;
+            if (!TryFindCrashDestinationInRing(incident.Center,
                 _config.Helicopter.MinimumCrashDistanceFromRaid,
                 _config.Helicopter.MaximumCrashDistanceFromRaid,
-                out crashDestination))
+                _config.Helicopter.MaximumShallowWaterCrashDepthMeters,
+                _config.Helicopter.AllowDeepWaterCrashFallback,
+                out crashDestination, out crashSurface))
             {
-                PrintWarning("No valid dry-land crash destination was found between "
+                PrintWarning("No valid crash destination was found between "
                     + _config.Helicopter.MinimumCrashDistanceFromRaid.ToString("0", CultureInfo.InvariantCulture)
                     + " and "
                     + _config.Helicopter.MaximumCrashDistanceFromRaid.ToString("0", CultureInfo.InvariantCulture)
@@ -1644,6 +1813,12 @@ namespace Oxide.Plugins
 
             crashDestination.y = GetSurfaceHeight(crashDestination) + ai.GetPlaneHeight();
             incident.CrashDestination = crashDestination;
+            Puts("AntiRaidHeli response " + incident.ResponseLevel
+                + " selected a " + GetCrashSurfaceDescription(crashSurface)
+                + " crash destination "
+                + HorizontalDistance(ai.transform.position, crashDestination)
+                    .ToString("0", CultureInfo.InvariantCulture)
+                + " meters from the dying helicopter.");
             ai.SetTargetDestination(crashDestination, 25f, 30f);
         }
 
@@ -1658,8 +1833,36 @@ namespace Oxide.Plugins
             aimCone *= profile.GunAimConeScale;
         }
 
-        private static bool TryFindRandomDryLandInRing(Vector3 center,
-            float minimumDistance, float maximumDistance, out Vector3 position)
+        private static bool TryFindCrashDestinationInRing(Vector3 center,
+            float minimumDistance, float maximumDistance, float maximumShallowDepth,
+            bool allowDeepWaterFallback, out Vector3 position,
+            out CrashSurfaceType crashSurface)
+        {
+            crashSurface = CrashSurfaceType.DryLand;
+            if (TryFindSurfaceInRing(center, minimumDistance, maximumDistance,
+                0f, out position))
+                return true;
+
+            if (maximumShallowDepth > 0f && TryFindSurfaceInRing(center,
+                minimumDistance, maximumDistance, maximumShallowDepth, out position))
+            {
+                crashSurface = CrashSurfaceType.ShallowWater;
+                return true;
+            }
+
+            if (allowDeepWaterFallback && TryFindSurfaceInRing(center,
+                minimumDistance, maximumDistance, -1f, out position))
+            {
+                crashSurface = CrashSurfaceType.DeepWater;
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool TryFindSurfaceInRing(Vector3 center,
+            float minimumDistance, float maximumDistance, float maximumShallowDepth,
+            out Vector3 position)
         {
             position = Vector3.zero;
             if (TerrainMeta.HeightMap == null || TerrainMeta.WaterMap == null)
@@ -1680,7 +1883,7 @@ namespace Oxide.Plugins
                 Vector3 candidate = center + new Vector3(Mathf.Cos(angle), 0f,
                     Mathf.Sin(angle)) * distance;
                 if (Mathf.Abs(candidate.x) >= halfX || Mathf.Abs(candidate.z) >= halfZ
-                    || !IsDryLand(candidate))
+                    || !IsAcceptableCrashSurface(candidate, maximumShallowDepth))
                     continue;
 
                 position = candidate;
@@ -1700,7 +1903,7 @@ namespace Oxide.Plugins
                     Vector3 candidate = center + new Vector3(Mathf.Cos(angle), 0f,
                         Mathf.Sin(angle)) * distance;
                     if (Mathf.Abs(candidate.x) >= halfX || Mathf.Abs(candidate.z) >= halfZ
-                        || !IsDryLand(candidate))
+                        || !IsAcceptableCrashSurface(candidate, maximumShallowDepth))
                         continue;
 
                     position = candidate;
@@ -1709,6 +1912,34 @@ namespace Oxide.Plugins
             }
 
             return false;
+        }
+
+        private static bool IsAcceptableCrashSurface(Vector3 position,
+            float maximumShallowDepth)
+        {
+            if (Mathf.Approximately(maximumShallowDepth, 0f))
+                return IsDryLand(position);
+
+            float terrainHeight = TerrainMeta.HeightMap.GetHeight(position);
+            float waterHeight = TerrainMeta.WaterMap.GetHeight(position);
+            float waterDepth = waterHeight - terrainHeight;
+            if (maximumShallowDepth < 0f)
+                return waterDepth > 0.25f;
+
+            return waterDepth > 0.25f && waterDepth <= maximumShallowDepth;
+        }
+
+        private static string GetCrashSurfaceDescription(CrashSurfaceType crashSurface)
+        {
+            switch (crashSurface)
+            {
+                case CrashSurfaceType.ShallowWater:
+                    return "shallow-water";
+                case CrashSurfaceType.DeepWater:
+                    return "deep-water fallback";
+                default:
+                    return "dry-land";
+            }
         }
 
         private void ConfigureHelicopter(RaidIncident incident, PatrolHelicopter helicopter,
@@ -1781,10 +2012,13 @@ namespace Oxide.Plugins
 
             helicopter.UpdateNetworkGroup();
             helicopter.SendNetworkUpdateImmediate();
+            InitializeHelicopterHealthTelemetry(incident, helicopter, profile);
         }
 
         private void OnEntityKill(PatrolHelicopter helicopter)
         {
+            if (helicopter != null)
+                _helicopterHealthTelemetry.Remove(helicopter);
             if (helicopter != null && _retiringHelicopters.Remove(helicopter))
                 return;
 
@@ -2061,6 +2295,8 @@ namespace Oxide.Plugins
                 RaidIncident incident = _incidents[i];
                 MaintainHostilityNotices(incident, now);
 
+                UpdateIncidentBoatPosition(incident);
+
                 if (!incident.Qualified)
                 {
                     if (now - incident.CreatedAt
@@ -2109,11 +2345,39 @@ namespace Oxide.Plugins
                         || helicopter.myAI == null)
                         continue;
 
+                    ObserveHelicopterHealth(incident, helicopter);
+                    if (IsHelicopterDying(helicopter.myAI))
+                        continue;
+
                     MaintainHelicopterPosition(incident, helicopter.myAI);
                     RefreshEligibleTargets(incident, helicopter.myAI);
                     TryStartAggressorShelterStrafe(incident, helicopter.myAI);
                 }
             }
+        }
+
+        private void UpdateIncidentBoatPosition(RaidIncident incident)
+        {
+            BaseEntity boat = incident?.ProtectedBoat;
+            if (boat == null || boat.IsDestroyed)
+                return;
+
+            Vector3 position = boat.transform.position;
+            if (HorizontalDistanceSquared(position, incident.Center) < 0.25f)
+                return;
+
+            incident.Center = position;
+            MoveMarker(incident.LabelMarker, position);
+            MoveMarker(incident.RadiusMarker, position);
+        }
+
+        private static void MoveMarker(BaseEntity marker, Vector3 position)
+        {
+            if (marker == null || marker.IsDestroyed)
+                return;
+
+            marker.transform.position = position;
+            marker.SendNetworkUpdate();
         }
 
         private void PauseIncident(RaidIncident incident, bool announce)
@@ -2193,8 +2457,158 @@ namespace Oxide.Plugins
             return state;
         }
 
+        private void InitializeHelicopterHealthTelemetry(RaidIncident incident,
+            PatrolHelicopter helicopter, ResponseProfile profile)
+        {
+            if (helicopter == null || helicopter.IsDestroyed)
+                return;
+
+            var telemetry = CaptureHealthTelemetry(helicopter);
+            _helicopterHealthTelemetry[helicopter] = telemetry;
+            Puts("Health telemetry started for response " + incident.ResponseLevel
+                + " helicopter " + GetHelicopterNetworkId(helicopter)
+                + ": configured=" + profile.Health.ToString("0.##",
+                    CultureInfo.InvariantCulture)
+                + ", live=" + telemetry.Body.ToString("0.##",
+                    CultureInfo.InvariantCulture)
+                + "/" + telemetry.MaximumBody.ToString("0.##",
+                    CultureInfo.InvariantCulture)
+                + ", rotors=" + telemetry.MainRotor.ToString("0.##",
+                    CultureInfo.InvariantCulture)
+                + "/" + telemetry.TailRotor.ToString("0.##",
+                    CultureInfo.InvariantCulture) + ".");
+        }
+
+        private void QueueHelicopterDamageTelemetry(RaidIncident incident,
+            PatrolHelicopter helicopter, float incomingDamage)
+        {
+            if (incident == null || helicopter == null || helicopter.IsDestroyed)
+                return;
+
+            HelicopterHealthTelemetry before = CaptureHealthTelemetry(helicopter);
+            NextTick(() =>
+            {
+                if (helicopter == null || helicopter.IsDestroyed)
+                    return;
+
+                HelicopterHealthTelemetry current;
+                if (!_helicopterHealthTelemetry.TryGetValue(helicopter, out current))
+                {
+                    current = before;
+                    _helicopterHealthTelemetry[helicopter] = current;
+                }
+
+                HelicopterHealthTelemetry after = CaptureHealthTelemetry(helicopter);
+                current.HitCount++;
+                current.ReportedIncomingDamage += incomingDamage;
+                current.ObservedBodyDamage += Mathf.Max(0f, before.Body - after.Body);
+                current.ObservedRotorDamage += Mathf.Max(0f,
+                    before.MainRotor - after.MainRotor)
+                    + Mathf.Max(0f, before.TailRotor - after.TailRotor);
+                DetectHealthIncrease(incident, helicopter, current, after,
+                    "immediately after a damage hook");
+                current.CopyLiveValues(after);
+            });
+        }
+
+        private void ObserveHelicopterHealth(RaidIncident incident,
+            PatrolHelicopter helicopter)
+        {
+            HelicopterHealthTelemetry current;
+            if (!_helicopterHealthTelemetry.TryGetValue(helicopter, out current))
+            {
+                _helicopterHealthTelemetry[helicopter] = CaptureHealthTelemetry(helicopter);
+                return;
+            }
+
+            HelicopterHealthTelemetry observed = CaptureHealthTelemetry(helicopter);
+            bool isDying = IsHelicopterDying(helicopter.myAI);
+            if (isDying && !current.WasDying)
+            {
+                current.WasDying = true;
+                current.DeathStateStartedAt = Time.realtimeSinceStartup;
+                float crashDistance = incident == null
+                    || incident.CrashDestination == Vector3.zero
+                    ? -1f : HorizontalDistance(helicopter.transform.position,
+                        incident.CrashDestination);
+                Puts("AntiRaidHeli response " + (incident?.ResponseLevel ?? 0)
+                    + " helicopter " + GetHelicopterNetworkId(helicopter)
+                    + " entered its dying state at body health "
+                    + observed.Body.ToString("0.##", CultureInfo.InvariantCulture)
+                    + (crashDistance < 0f ? "." : "; controlled crash destination is "
+                        + crashDistance.ToString("0", CultureInfo.InvariantCulture)
+                        + " meters away."));
+            }
+            DetectHealthIncrease(incident, helicopter, current, observed,
+                "during the one-second maintenance check");
+            current.CopyLiveValues(observed);
+        }
+
+        private static bool IsHelicopterDying(PatrolHelicopterAI ai)
+        {
+            return ai != null && (ai.isDead
+                || ai._currentState == PatrolHelicopterAI.aiState.DEATH);
+        }
+
+        private void DetectHealthIncrease(RaidIncident incident,
+            PatrolHelicopter helicopter, HelicopterHealthTelemetry previous,
+            HelicopterHealthTelemetry current, string context)
+        {
+            if (helicopter?.myAI == null || helicopter.myAI.isDead)
+                return;
+
+            bool bodyIncreased = current.Body > previous.Body + 0.5f;
+            bool mainIncreased = current.MainRotor > previous.MainRotor + 0.5f;
+            bool tailIncreased = current.TailRotor > previous.TailRotor + 0.5f;
+            bool maximumChanged = Math.Abs(current.MaximumBody
+                - previous.MaximumBody) > 0.5f;
+            if (!bodyIncreased && !mainIncreased && !tailIncreased && !maximumChanged)
+                return;
+
+            PrintWarning("Detected an unexpected AntiRaidHeli health change "
+                + context + " for response " + incident.ResponseLevel
+                + " helicopter " + GetHelicopterNetworkId(helicopter)
+                + ": body " + previous.Body.ToString("0.##", CultureInfo.InvariantCulture)
+                + " -> " + current.Body.ToString("0.##", CultureInfo.InvariantCulture)
+                + " (max " + previous.MaximumBody.ToString("0.##",
+                    CultureInfo.InvariantCulture) + " -> "
+                + current.MaximumBody.ToString("0.##", CultureInfo.InvariantCulture)
+                + "), main rotor " + previous.MainRotor.ToString("0.##",
+                    CultureInfo.InvariantCulture) + " -> "
+                + current.MainRotor.ToString("0.##", CultureInfo.InvariantCulture)
+                + ", tail rotor " + previous.TailRotor.ToString("0.##",
+                    CultureInfo.InvariantCulture) + " -> "
+                + current.TailRotor.ToString("0.##", CultureInfo.InvariantCulture) + ".");
+        }
+
+        private static HelicopterHealthTelemetry CaptureHealthTelemetry(
+            PatrolHelicopter helicopter)
+        {
+            var telemetry = new HelicopterHealthTelemetry
+            {
+                Body = helicopter?.Health() ?? 0f,
+                MaximumBody = helicopter?._maxHealth ?? 0f
+            };
+            if (helicopter?.weakspots != null && helicopter.weakspots.Length >= 2)
+            {
+                telemetry.MainRotor = helicopter.weakspots[0].health;
+                telemetry.MaximumMainRotor = helicopter.weakspots[0].maxHealth;
+                telemetry.TailRotor = helicopter.weakspots[1].health;
+                telemetry.MaximumTailRotor = helicopter.weakspots[1].maxHealth;
+            }
+            return telemetry;
+        }
+
+        private static ulong GetHelicopterNetworkId(PatrolHelicopter helicopter)
+        {
+            return helicopter?.net == null ? 0UL : helicopter.net.ID.Value;
+        }
+
         private void MaintainHelicopterPosition(RaidIncident incident, PatrolHelicopterAI ai)
         {
+            ai.hasInterestZone = true;
+            ai.interestZoneOrigin = incident.Center;
+
             PatrolHelicopter helicopter = ai.helicopterBase as PatrolHelicopter;
             int unitIndex = incident.GetHelicopterUnitIndex(helicopter);
             float orbitRadius = Mathf.Min(250f, _config.Helicopter.OrbitRadius
@@ -2235,6 +2649,9 @@ namespace Oxide.Plugins
 
         private void RefreshEligibleTargets(RaidIncident incident, PatrolHelicopterAI ai)
         {
+            if (IsHelicopterDying(ai))
+                return;
+
             for (int i = ai._targetList.Count - 1; i >= 0; i--)
             {
                 PatrolHelicopterAI.targetinfo target = ai._targetList[i];
@@ -2660,7 +3077,7 @@ namespace Oxide.Plugins
         private void TryStartAggressorShelterStrafe(RaidIncident incident,
             PatrolHelicopterAI ai)
         {
-            if (incident == null || ai == null)
+            if (incident == null || ai == null || IsHelicopterDying(ai))
                 return;
 
             ResponseProfile profile = incident?.GetCurrentProfile(_config);
@@ -2755,15 +3172,17 @@ namespace Oxide.Plugins
         {
             shelterPosition = Vector3.zero;
             float bestDistance = float.MaxValue;
-            List<BuildingBlock> blocks = Facepunch.Pool.Get<List<BuildingBlock>>();
+            List<BaseCombatEntity> blocks = Facepunch.Pool.Get<List<BaseCombatEntity>>();
             try
             {
                 Vis.Entities(playerPosition, 15f, blocks, Layers.Mask.Construction,
                     QueryTriggerInteraction.Ignore);
                 for (int i = 0; i < blocks.Count; i++)
                 {
-                    BuildingBlock block = blocks[i];
+                    BaseCombatEntity block = blocks[i];
                     if (block == null || block.IsDestroyed
+                        || (!(block is BuildingBlock)
+                            && !(block is BoatBuildingBlock))
                         || !CanHelicopterDamageAsset(incident, block))
                         continue;
 
@@ -3168,7 +3587,8 @@ namespace Oxide.Plugins
 
             BaseCombatEntity target = hit.GetEntity() as BaseCombatEntity;
             uint buildingId = GetBuildingId(target);
-            if (target == null || buildingId == 0)
+            ulong boatId = GetBoatId(target);
+            if (target == null || (buildingId == 0 && boatId == 0UL))
             {
                 Reply(player, "TestTargetRequired");
                 return;
@@ -3182,9 +3602,24 @@ namespace Oxide.Plugins
             RaidIncident incident = StartManualIncident(target.transform.position,
                 level, player.userID);
             incident.IsAdminTest = true;
-            incident.ProtectedBuildingIds.Add(buildingId);
+            if (buildingId != 0)
+                incident.ProtectedBuildingIds.Add(buildingId);
+            if (boatId != 0UL)
+                incident.ProtectedBoatIds.Add(boatId);
             Reply(player, "TestStarted", level,
                 MapHelper.GridToString(MapHelper.PositionToGrid(target.transform.position)));
+        }
+
+        [ChatCommand("antiraidhelistatus")]
+        private void CommandStatus(BasePlayer player, string command, string[] args)
+        {
+            if (!HasAdminAccess(player))
+            {
+                Reply(player, "NoPermission");
+                return;
+            }
+
+            player.ChatMessage(BuildHealthStatusReport());
         }
 
         private RaidIncident StartManualIncident(Vector3 center, int level,
@@ -3305,6 +3740,106 @@ namespace Oxide.Plugins
             arg.ReplyWith(string.Format(lang.GetMessage("ManualTestStarted", this,
                 player?.UserIDString), level,
                 MapHelper.GridToString(MapHelper.PositionToGrid(incident.Center))));
+        }
+
+        [ConsoleCommand("antiraidheli.status")]
+        private void ConsoleStatus(ConsoleSystem.Arg arg)
+        {
+            BasePlayer player = arg.Player();
+            if (player != null && !HasAdminAccess(player))
+            {
+                arg.ReplyWith(lang.GetMessage("NoPermission", this,
+                    player.UserIDString));
+                return;
+            }
+
+            arg.ReplyWith(BuildHealthStatusReport());
+        }
+
+        private string BuildHealthStatusReport()
+        {
+            var report = new StringBuilder();
+            report.AppendLine("AntiRaidHeli live health status:");
+            int liveHelicopters = 0;
+
+            for (int incidentIndex = 0; incidentIndex < _incidents.Count;
+                incidentIndex++)
+            {
+                RaidIncident incident = _incidents[incidentIndex];
+                if (incident == null)
+                    continue;
+
+                ResponseProfile profile = incident.GetCurrentProfile(_config);
+                incident.PruneDestroyedHelicopters();
+                for (int helicopterIndex = 0;
+                    helicopterIndex < incident.Helicopters.Count; helicopterIndex++)
+                {
+                    PatrolHelicopter helicopter = incident.Helicopters[helicopterIndex];
+                    if (helicopter == null || helicopter.IsDestroyed)
+                        continue;
+
+                    liveHelicopters++;
+                    HelicopterHealthTelemetry live = CaptureHealthTelemetry(helicopter);
+                    HelicopterHealthTelemetry telemetry;
+                    _helicopterHealthTelemetry.TryGetValue(helicopter, out telemetry);
+                    report.Append("Round ").Append(incident.ResponseLevel)
+                        .Append(" unit ").Append(helicopterIndex + 1)
+                        .Append(" [net ").Append(GetHelicopterNetworkId(helicopter))
+                        .Append("]: configured ")
+                        .Append((profile?.Health ?? 0f).ToString("0.##",
+                            CultureInfo.InvariantCulture))
+                        .Append(", body ")
+                        .Append(live.Body.ToString("0.##", CultureInfo.InvariantCulture))
+                        .Append('/').Append(live.MaximumBody.ToString("0.##",
+                            CultureInfo.InvariantCulture))
+                        .Append(", main rotor ")
+                        .Append(live.MainRotor.ToString("0.##", CultureInfo.InvariantCulture))
+                        .Append('/').Append(live.MaximumMainRotor.ToString("0.##",
+                            CultureInfo.InvariantCulture))
+                        .Append(", tail rotor ")
+                        .Append(live.TailRotor.ToString("0.##", CultureInfo.InvariantCulture))
+                        .Append('/').Append(live.MaximumTailRotor.ToString("0.##",
+                            CultureInfo.InvariantCulture))
+                        .Append(", state ").Append(helicopter.myAI == null
+                            ? "unavailable" : helicopter.myAI._currentState.ToString())
+                        .Append(", dying ").Append(IsHelicopterDying(helicopter.myAI)
+                            ? "yes" : "no");
+                    if (telemetry != null)
+                    {
+                        report.Append(", observed hits ").Append(telemetry.HitCount)
+                            .Append(", incoming damage ")
+                            .Append(telemetry.ReportedIncomingDamage.ToString("0.##",
+                                CultureInfo.InvariantCulture))
+                            .Append(", body loss ")
+                            .Append(telemetry.ObservedBodyDamage.ToString("0.##",
+                                CultureInfo.InvariantCulture))
+                            .Append(", rotor loss ")
+                            .Append(telemetry.ObservedRotorDamage.ToString("0.##",
+                                CultureInfo.InvariantCulture));
+                        if (telemetry.WasDying)
+                        {
+                            report.Append(", death flight ")
+                                .Append(Mathf.Max(0f, Time.realtimeSinceStartup
+                                    - telemetry.DeathStateStartedAt).ToString("0",
+                                        CultureInfo.InvariantCulture))
+                                .Append("s");
+                        }
+                    }
+                    if (incident.CrashDestination != Vector3.zero)
+                    {
+                        report.Append(", crash target distance ")
+                            .Append(HorizontalDistance(helicopter.transform.position,
+                                incident.CrashDestination).ToString("0",
+                                    CultureInfo.InvariantCulture))
+                            .Append('m');
+                    }
+                    report.AppendLine();
+                }
+            }
+
+            if (liveHelicopters == 0)
+                report.Append("No live AntiRaidHeli aircraft are currently tracked.");
+            return report.ToString().TrimEnd();
         }
 
         private int StopAllIncidents(bool announce)
@@ -3648,6 +4183,8 @@ namespace Oxide.Plugins
             _config.Helicopter.MaximumCrashDistanceFromRaid = Mathf.Max(
                 _config.Helicopter.MinimumCrashDistanceFromRaid,
                 _config.Helicopter.MaximumCrashDistanceFromRaid);
+            _config.Helicopter.MaximumShallowWaterCrashDepthMeters = Mathf.Clamp(
+                _config.Helicopter.MaximumShallowWaterCrashDepthMeters, 0f, 10f);
             _config.Helicopter.MultiHelicopterOrbitSpacing = Mathf.Clamp(
                 _config.Helicopter.MultiHelicopterOrbitSpacing, 20f, 100f);
             _config.Helicopter.MultiHelicopterAttackStaggerSeconds = Mathf.Clamp(
@@ -3725,6 +4262,25 @@ namespace Oxide.Plugins
                 _config.Enabled = false;
                 ApplyControlledBetaV12Defaults(_config.ResponseProfiles);
                 _config.ConfigurationVersion = 12;
+            }
+            if (_config.ConfigurationVersion < 13)
+            {
+                _config.Helicopter.MinimumCrashDistanceFromRaid = 50f;
+                _config.Helicopter.MaximumCrashDistanceFromRaid = 600f;
+                _config.Helicopter.MaximumShallowWaterCrashDepthMeters = 3f;
+                _config.ConfigurationVersion = 13;
+            }
+            if (_config.ConfigurationVersion < 14)
+            {
+                _config.Helicopter.MinimumCrashDistanceFromRaid = 50f;
+                _config.Helicopter.MaximumCrashDistanceFromRaid = 300f;
+                _config.Helicopter.AllowDeepWaterCrashFallback = true;
+                _config.ConfigurationVersion = 14;
+            }
+            if (_config.ConfigurationVersion < 15)
+            {
+                ApplyProductionHealthV15Defaults(_config.ResponseProfiles);
+                _config.ConfigurationVersion = 15;
             }
 
             foreach (ResponseProfile profile in _config.ResponseProfiles)
@@ -4001,10 +4557,33 @@ namespace Oxide.Plugins
             }
         }
 
+        private static void ApplyProductionHealthV15Defaults(
+            List<ResponseProfile> profiles)
+        {
+            float[] betaHealth = { 3000f, 6000f, 9000f, 12000f };
+            float[] productionHealth = { 30000f, 50000f, 80000f, 120000f };
+
+            for (int i = 0; i < profiles.Count && i < productionHealth.Length; i++)
+            {
+                ResponseProfile profile = profiles[i];
+                if (profile == null)
+                    continue;
+
+                // Only replace the supervised-test ladder. Preserve any values
+                // an administrator has deliberately customized.
+                if (!Mathf.Approximately(profile.Health, betaHealth[i]))
+                    continue;
+
+                profile.Health = productionHealth[i];
+                profile.MainRotorHealth = productionHealth[i] * 0.09f;
+                profile.TailRotorHealth = productionHealth[i] * 0.05f;
+            }
+        }
+
         private sealed class PluginConfiguration
         {
             [JsonProperty("Configuration version")]
-            public int ConfigurationVersion = 12;
+            public int ConfigurationVersion = 15;
 
             [JsonProperty("Enabled")]
             public bool Enabled = false;
@@ -4053,9 +4632,9 @@ namespace Oxide.Plugins
                     {
                         Level = 1,
                         Name = "Suppression",
-                        Health = 3000f,
-                        MainRotorHealth = 270f,
-                        TailRotorHealth = 150f,
+                        Health = 30000f,
+                        MainRotorHealth = 2700f,
+                        TailRotorHealth = 1500f,
                         CombatEscalationHealthRemainingPercent = 50f,
                         LootCratesOnDeath = 1,
                         BulletDamage = 20f,
@@ -4073,9 +4652,9 @@ namespace Oxide.Plugins
                     {
                         Level = 2,
                         Name = "Escalation",
-                        Health = 6000f,
-                        MainRotorHealth = 540f,
-                        TailRotorHealth = 300f,
+                        Health = 50000f,
+                        MainRotorHealth = 4500f,
+                        TailRotorHealth = 2500f,
                         CombatEscalationHealthRemainingPercent = 65f,
                         LootCratesOnDeath = 1,
                         BulletDamage = 30f,
@@ -4095,9 +4674,9 @@ namespace Oxide.Plugins
                     {
                         Level = 3,
                         Name = "Maximum Response",
-                        Health = 9000f,
-                        MainRotorHealth = 810f,
-                        TailRotorHealth = 450f,
+                        Health = 80000f,
+                        MainRotorHealth = 7200f,
+                        TailRotorHealth = 4000f,
                         CombatEscalationHealthRemainingPercent = 75f,
                         LootCratesOnDeath = 2,
                         BulletDamage = 40f,
@@ -4117,9 +4696,9 @@ namespace Oxide.Plugins
                     {
                         Level = 4,
                         Name = "Final Response",
-                        Health = 12000f,
-                        MainRotorHealth = 1080f,
-                        TailRotorHealth = 600f,
+                        Health = 120000f,
+                        MainRotorHealth = 10800f,
+                        TailRotorHealth = 6000f,
                         CombatEscalationHealthRemainingPercent = 85f,
                         LootCratesOnDeath = 3,
                         EnableMultiHelicopterResponse = true,
@@ -4339,10 +4918,16 @@ namespace Oxide.Plugins
             public bool RandomizeCrashDestination = true;
 
             [JsonProperty("Minimum crash distance from raid meters")]
-            public float MinimumCrashDistanceFromRaid = 300f;
+            public float MinimumCrashDistanceFromRaid = 50f;
 
             [JsonProperty("Maximum crash distance from raid meters")]
-            public float MaximumCrashDistanceFromRaid = 600f;
+            public float MaximumCrashDistanceFromRaid = 300f;
+
+            [JsonProperty("Maximum shallow-water crash depth meters (0 = dry land only)")]
+            public float MaximumShallowWaterCrashDepthMeters = 3f;
+
+            [JsonProperty("Allow deep-water crash fallback when no land or shallow water is available")]
+            public bool AllowDeepWaterCrashFallback = true;
         }
 
         private sealed class MapMarkerConfiguration
@@ -4429,13 +5014,13 @@ namespace Oxide.Plugins
             public string Name = "Suppression";
 
             [JsonProperty("Health")]
-            public float Health = 100000f;
+            public float Health = 30000f;
 
             [JsonProperty("Main rotor health")]
-            public float MainRotorHealth = 9000f;
+            public float MainRotorHealth = 2700f;
 
             [JsonProperty("Tail rotor health")]
-            public float TailRotorHealth = 5000f;
+            public float TailRotorHealth = 1500f;
 
             [JsonProperty("Escalate rockets and napalm at remaining health percent")]
             public float CombatEscalationHealthRemainingPercent = 50f;
@@ -4586,6 +5171,13 @@ namespace Oxide.Plugins
 
         #region Runtime models
 
+        private enum CrashSurfaceType
+        {
+            DryLand,
+            ShallowWater,
+            DeepWater
+        }
+
         private sealed class RaidIncident
         {
             public Vector3 Center;
@@ -4625,9 +5217,11 @@ namespace Oxide.Plugins
             public Timer SpawnTimer;
             public VendingMachineMapMarker LabelMarker;
             public MapMarkerGenericRadius RadiusMarker;
+            public BaseEntity ProtectedBoat;
             public readonly HashSet<ulong> VictimOwnerIds = new HashSet<ulong>();
             public readonly HashSet<ulong> AggressorOwnerIds = new HashSet<ulong>();
             public readonly HashSet<uint> ProtectedBuildingIds = new HashSet<uint>();
+            public readonly HashSet<ulong> ProtectedBoatIds = new HashSet<ulong>();
             public readonly HashSet<uint> HostileBuildingIds = new HashSet<uint>();
             public readonly Dictionary<uint, float> CandidateUseStartedAt =
                 new Dictionary<uint, float>();
@@ -4833,6 +5427,35 @@ namespace Oxide.Plugins
             public float TailRotorHealth;
         }
 
+        private sealed class HelicopterHealthTelemetry
+        {
+            public float Body;
+            public float MaximumBody;
+            public float MainRotor;
+            public float MaximumMainRotor;
+            public float TailRotor;
+            public float MaximumTailRotor;
+            public int HitCount;
+            public float ReportedIncomingDamage;
+            public float ObservedBodyDamage;
+            public float ObservedRotorDamage;
+            public bool WasDying;
+            public float DeathStateStartedAt;
+
+            public void CopyLiveValues(HelicopterHealthTelemetry source)
+            {
+                if (source == null)
+                    return;
+
+                Body = source.Body;
+                MaximumBody = source.MaximumBody;
+                MainRotor = source.MainRotor;
+                MaximumMainRotor = source.MaximumMainRotor;
+                TailRotor = source.TailRotor;
+                MaximumTailRotor = source.MaximumTailRotor;
+            }
+        }
+
         private sealed class RaidProgressData
         {
             [JsonProperty("Remembered raid responses")]
@@ -4881,6 +5504,9 @@ namespace Oxide.Plugins
 
             [JsonProperty("Protected building IDs")]
             public List<uint> ProtectedBuildingIds = new List<uint>();
+
+            [JsonProperty("Protected boat IDs")]
+            public List<ulong> ProtectedBoatIds = new List<ulong>();
 
             [JsonProperty("Hostile building IDs")]
             public List<uint> HostileBuildingIds = new List<uint>();

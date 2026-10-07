@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.2 - 2026-10-07
+
+- Promoted the verified response-health ladder to 30,000 / 50,000 / 80,000 / 120,000 health across rounds 1–4; both final-round helicopters independently receive 120,000 health.
+- Added configuration migration version 15, which upgrades only the temporary 3,000 / 6,000 / 9,000 / 12,000 test ladder and preserves administrator-customized health values.
+- Added health telemetry and an administrator status report to diagnose unexpected fuselage or rotor-health changes during live testing.
+- Prevented active patrol and targeting maintenance from interfering with helicopters that have entered Rust's death state, allowing damaged aircraft to complete their intended crash flight.
+- Changed randomized crash destinations to a configurable 50–300 metre ring, preferring dry land, then shallow water, with an optional deep-water fallback for offshore raids.
+- Added support for current player-built boats and vehicle privileges when identifying raid targets, protected victim property, authorized occupants, moving raid centers, map markers, and aggressor shelters.
+- Retained compatibility with legacy tugboat entities while avoiding any dependency on their continued availability in Rust's spawn tables.
+
 ## 0.6.1 - 2026-10-06
 
 - Made AntiRaidHeli independent of the server-wide `patrolhelicopterai.flee_damage_percentage` convar.
