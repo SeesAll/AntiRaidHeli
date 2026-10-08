@@ -13,7 +13,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("AntiRaidHeli", "SeesAll", "0.6.9")]
+    [Info("AntiRaidHeli", "SeesAll", "0.6.10")]
     [Description("Deploys escalating patrol helicopters over active player raids.")]
     public class AntiRaidHeli : RustPlugin
     {
@@ -60,6 +60,10 @@ namespace Oxide.Plugins
         private readonly Dictionary<PatrolHelicopter, HelicopterHealthTelemetry>
             _helicopterHealthTelemetry =
                 new Dictionary<PatrolHelicopter, HelicopterHealthTelemetry>();
+        private readonly Dictionary<BaseEntity, RaidIncident> _trackedDamageSources =
+            new Dictionary<BaseEntity, RaidIncident>();
+        private readonly List<BaseEntity> _destroyedDamageSources =
+            new List<BaseEntity>();
         private readonly Dictionary<ulong, float> _repairLockNoticeAt =
             new Dictionary<ulong, float>();
         private readonly Dictionary<uint, RecentConstructionRecord> _recentConstruction =
@@ -72,6 +76,9 @@ namespace Oxide.Plugins
         private bool _constructionDataDirty;
         private bool _unloading;
         private bool _noEscapeCallWarningShown;
+        private int _raidProtectionBypassesGranted;
+        private int _raidProtectionBypassesDeniedUnresolved;
+        private int _raidProtectionBypassesDeniedProtected;
         private uint _hostilityIconCrc;
         private Harmony _harmony;
         private MethodInfo _deathEnterMethod;
@@ -134,6 +141,8 @@ namespace Oxide.Plugins
             }
             _retiringHelicopters.Clear();
             _helicopterHealthTelemetry.Clear();
+            _trackedDamageSources.Clear();
+            _destroyedDamageSources.Clear();
             Instance = null;
         }
 
@@ -1053,11 +1062,36 @@ namespace Oxide.Plugins
 
         private RaidIncident ResolveIncidentFromDamage(HitInfo info)
         {
-            BaseEntity source = info?.Initiator as BaseEntity
-                ?? info?.Weapon as BaseEntity
-                ?? info?.WeaponPrefab as BaseEntity;
+            if (info == null)
+                return null;
+
+            BaseEntity initiator = info.Initiator as BaseEntity;
+            RaidIncident incident = ResolveIncidentFromDamageSource(initiator);
+            if (incident != null)
+                return incident;
+
+            BaseEntity weapon = info.Weapon as BaseEntity;
+            if (!ReferenceEquals(weapon, initiator))
+            {
+                incident = ResolveIncidentFromDamageSource(weapon);
+                if (incident != null)
+                    return incident;
+            }
+
+            BaseEntity weaponPrefab = info.WeaponPrefab as BaseEntity;
+            return ReferenceEquals(weaponPrefab, initiator)
+                || ReferenceEquals(weaponPrefab, weapon)
+                ? null : ResolveIncidentFromDamageSource(weaponPrefab);
+        }
+
+        private RaidIncident ResolveIncidentFromDamageSource(BaseEntity source)
+        {
             for (int depth = 0; source != null && depth < 4; depth++)
             {
+                RaidIncident trackedIncident;
+                if (_trackedDamageSources.TryGetValue(source, out trackedIncident))
+                    return trackedIncident;
+
                 PatrolHelicopter helicopter = source as PatrolHelicopter;
                 if (helicopter != null)
                     return FindIncident(helicopter);
@@ -1084,11 +1118,26 @@ namespace Oxide.Plugins
                 return null;
 
             RaidIncident incident = ResolveIncidentFromDamage(info);
-            if (incident == null || !incident.Qualified
-                || incident.ResponseCompleted || incident.PausedForInactivity)
+            if (incident == null)
+            {
+                _raidProtectionBypassesDeniedUnresolved++;
                 return null;
+            }
+            if (!incident.Qualified || incident.ResponseCompleted
+                || incident.PausedForInactivity)
+            {
+                _raidProtectionBypassesDeniedProtected++;
+                return null;
+            }
 
-            return CanHelicopterDamageAsset(incident, entity) ? (object)true : null;
+            if (!CanHelicopterDamageAsset(incident, entity))
+            {
+                _raidProtectionBypassesDeniedProtected++;
+                return null;
+            }
+
+            _raidProtectionBypassesGranted++;
+            return true;
         }
 
         private static bool IsPotentialPlayerAsset(BaseCombatEntity entity)
@@ -1126,12 +1175,21 @@ namespace Oxide.Plugins
             // occupants do not attack the response helicopter. Once somebody
             // associated with that asset engages it, the asset becomes a valid
             // target just like any other combatant shelter inside the danger zone.
-            bool protectedVictimAsset = (ownerId.IsSteamId()
-                    && IsVictimOwner(incident, ownerId))
-                || (buildingId != 0
+            bool exactProtectedVictimAsset = (buildingId != 0
                     && incident.ProtectedBuildingIds.Contains(buildingId))
                 || (boatId != 0UL
                     && incident.ProtectedBoatIds.Contains(boatId));
+
+            // Admin tests often use pasted bases that share the administrator's
+            // ownership with the separate structure used to attack the selected
+            // test base. Keep the exact building/boat selected by the command
+            // absolutely protected; only other nearby structures may be promoted
+            // to combatant targets during a controlled test.
+            if (incident.IsAdminTest && exactProtectedVictimAsset)
+                return false;
+
+            bool protectedVictimAsset = exactProtectedVictimAsset
+                || (ownerId.IsSteamId() && IsVictimOwner(incident, ownerId));
             if (protectedVictimAsset)
                 return helicopterCombatantAsset;
 
@@ -2356,13 +2414,14 @@ namespace Oxide.Plugins
             if (explosive == null)
                 return;
 
+            TrackDamageSource(explosive);
+
             NextTick(() =>
             {
                 if (explosive == null || explosive.IsDestroyed)
                     return;
 
-                PatrolHelicopter helicopter = explosive.creatorEntity as PatrolHelicopter;
-                RaidIncident incident = FindIncident(helicopter);
+                RaidIncident incident = TrackDamageSource(explosive);
                 ResponseProfile profile = incident?.GetCurrentProfile(_config);
                 if (profile == null || Mathf.Approximately(profile.RocketDamageScale, 1f))
                     return;
@@ -2370,6 +2429,55 @@ namespace Oxide.Plugins
                 foreach (DamageTypeEntry entry in explosive.damageTypes)
                     entry.amount *= profile.RocketDamageScale;
             });
+        }
+
+        private void OnEntitySpawned(FireBall fire)
+        {
+            if (fire == null)
+                return;
+
+            TrackDamageSource(fire);
+            NextTick(() =>
+            {
+                if (fire != null && !fire.IsDestroyed)
+                    TrackDamageSource(fire);
+            });
+        }
+
+        private void OnFireBallSpread(FireBall fire, BaseEntity spread)
+        {
+            if (fire == null || spread == null)
+                return;
+
+            RaidIncident incident = ResolveIncidentFromDamageSource(fire);
+            if (incident != null)
+                _trackedDamageSources[spread] = incident;
+        }
+
+        private RaidIncident TrackDamageSource(BaseEntity source)
+        {
+            if (source == null || source.IsDestroyed)
+                return null;
+
+            RaidIncident incident = ResolveIncidentFromDamageSource(
+                source.creatorEntity);
+            if (incident == null)
+                incident = ResolveIncidentFromDamageSource(source.GetParentEntity());
+            if (incident != null)
+                _trackedDamageSources[source] = incident;
+            return incident;
+        }
+
+        private void OnEntityKill(TimedExplosive explosive)
+        {
+            if (explosive != null)
+                _trackedDamageSources.Remove(explosive);
+        }
+
+        private void OnEntityKill(FireBall fire)
+        {
+            if (fire != null)
+                _trackedDamageSources.Remove(fire);
         }
 
         private object CanHelicopterTarget(PatrolHelicopterAI ai, BasePlayer player)
@@ -2651,6 +2759,7 @@ namespace Oxide.Plugins
         private void MaintainIncidents()
         {
             float now = Time.realtimeSinceStartup;
+            PruneTrackedDamageSources();
             if (now >= _nextConstructionPruneAt)
             {
                 _nextConstructionPruneAt = now + 60f;
@@ -2733,6 +2842,25 @@ namespace Oxide.Plugins
                     TryStartAggressorRocketStrafe(incident, helicopter.myAI);
                 }
             }
+        }
+
+        private void PruneTrackedDamageSources()
+        {
+            if (_trackedDamageSources.Count == 0)
+                return;
+
+            _destroyedDamageSources.Clear();
+            foreach (KeyValuePair<BaseEntity, RaidIncident> pair
+                in _trackedDamageSources)
+            {
+                if (pair.Key == null || pair.Key.IsDestroyed
+                    || pair.Value == null || !_incidents.Contains(pair.Value))
+                    _destroyedDamageSources.Add(pair.Key);
+            }
+
+            for (int i = 0; i < _destroyedDamageSources.Count; i++)
+                _trackedDamageSources.Remove(_destroyedDamageSources[i]);
+            _destroyedDamageSources.Clear();
         }
 
         private void UpdateIncidentBoatPosition(RaidIncident incident)
@@ -4193,6 +4321,13 @@ namespace Oxide.Plugins
                 .Append(GetCoverageMode())
                 .Append("; automatic monitoring: ")
                 .AppendLine(_config.ProtectionEnabled ? "enabled" : "stopped");
+            report.Append("RaidProtection bypasses since load: granted ")
+                .Append(_raidProtectionBypassesGranted)
+                .Append(", protected target/inactive incident ")
+                .Append(_raidProtectionBypassesDeniedProtected)
+                .Append(", unresolved ordnance source ")
+                .Append(_raidProtectionBypassesDeniedUnresolved)
+                .AppendLine();
             report.AppendLine("AntiRaidHeli live health status:");
             int liveHelicopters = 0;
 

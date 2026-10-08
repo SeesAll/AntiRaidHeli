@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.10 - 2026-10-07
+
+- Added explicit tracking for rockets, napalm fireballs, and spread fire created by AntiRaidHeli aircraft so downstream damage remains associated with the correct raid incident even when Rust provides an incomplete creator chain.
+- Hardened damage-source resolution to inspect the initiator, weapon, and weapon prefab independently instead of abandoning valid alternatives when the first source is present but unresolvable.
+- Fixed RaidProtection compatibility for tracked ordnance: confirmed aggressor/combatant structures can now consistently receive full configured helicopter damage, while unrelated and protected victim property retains normal RaidProtection behavior.
+- Made the exact building or player-built boat selected by `/antiraidhelitest` absolutely protected for that controlled test. CopyPaste ownership shared with the administrator can no longer promote the empty defended test property into an aggressor target.
+- Added cumulative RaidProtection bypass diagnostics to `/antiraidhelistatus`, separating granted bypasses, deliberately protected targets, and unresolved ordnance sources for live verification without per-hit log spam.
+- Kept damage-source cleanup allocation-free during normal maintenance and removed tracked projectiles promptly when their entities are destroyed.
+
 ## 0.6.9 - 2026-10-07
 
 - Added explicit `AllRaids`, `OfflineRaidsOnly`, and `Disabled` coverage modes without conflating policy with the persistent automatic-monitoring start/stop state.
