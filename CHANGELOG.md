@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.6.9 - 2026-10-07
+
+- Added explicit `AllRaids`, `OfflineRaidsOnly`, and `Disabled` coverage modes without conflating policy with the persistent automatic-monitoring start/stop state.
+- Added offline-raid qualification using captured property ownership and authorization plus the enabled native-team, Clans, and Friends relationship rules. The online/offline decision is locked when an incident qualifies so an active response cannot flicker as players connect or disconnect.
+- Made `/antiraidhelitest [level]` independent of both coverage mode and monitoring state. The looked-at building or player-built boat becomes the defended test property, and players who actually damage it are learned as aggressors through the normal targeting and raid-base classification path.
+- Made `/antiraidstop` and `/antiraidhelistop` stop automatic monitoring, terminate every live or test response, clear saved progress, and leave monitoring stopped until `/antiraidhelistart` succeeds.
+- Added a clear refusal message when an administrator tries to start monitoring while coverage mode is `Disabled`.
+- Removed the unsafe armed/threatening toggle. Non-aggressors now always need to satisfy Rust's armed/threatening behavior, while confirmed aggressors remain hostile for the configured timer.
+- Consolidated multi-helicopter configuration into one per-round count from one to three; `1` explicitly means a single-aircraft round. Removed the redundant enable switch and editable response-level field.
+- Renamed the per-profile aircraft count to `Number of helicopters deployed for this specific round` so it is unmistakable that each value applies only to its containing response profile.
+- Renamed accuracy settings with their accepted ranges and clarified that successful bullet-damage chance is separate from physical aim-cone spread.
+- Renamed the inactivity timer to document that both structural raid damage and combat against the helicopter refresh it, while paused round progress remains remembered.
+- Split the former adaptive-pressure block into `Continued raid activity escalation` and `Independent attacker-group escalation`, clarified that sustained/heavy pressure multipliers are shared by either trigger, and renamed the helicopter section to cover spawn, patrol, and crash behavior.
+- Added migration aliases for every renamed field and section so existing custom values survive the configuration cleanup.
+- Repaired a legacy standard-profile pattern that could retain placeholder 45% accuracy, `1.0` aim cone, and a single final-round helicopter. The intended defaults are now 65/75/85/92% successful bullet damage, 1.0/0.75/0.5/0.3 aim cone, and two helicopters in round 4.
+- Expanded the README with a practical configuration example, coverage and timing explanations, and a field-by-field guide to the shared response-profile settings.
+
 ## 0.6.8 - 2026-10-07
 
 - Completed a start-to-finish production-hardening pass covering incident lifecycle, cleanup, persistence, configuration validation, targeting, escalation, compatibility hooks, and hot-path allocations.

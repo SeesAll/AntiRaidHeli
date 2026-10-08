@@ -13,7 +13,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("AntiRaidHeli", "SeesAll", "0.6.8")]
+    [Info("AntiRaidHeli", "SeesAll", "0.6.9")]
     [Description("Deploys escalating patrol helicopters over active player raids.")]
     public class AntiRaidHeli : RustPlugin
     {
@@ -93,14 +93,14 @@ namespace Oxide.Plugins
             RegisterHostilityIcon();
             CleanupOrphanedMarkers();
             LoadConstructionHistory();
-            if (_config.Enabled)
+            if (IsAutomaticProtectionActive())
                 LoadRaidProgress();
             else
                 ClearRaidProgress();
             _maintenanceTimer = timer.Every(1f, MaintainIncidents);
-            Puts("Automatic raid protection is " + (_config.Enabled
-                ? "ENABLED."
-                : "DISABLED. Use /antiraidhelistart to enable it."));
+            Puts("Automatic raid protection mode is " + GetCoverageMode()
+                + "; runtime monitoring is " + (_config.ProtectionEnabled
+                    ? "ENABLED." : "STOPPED."));
         }
 
         private void OnServerSave()
@@ -409,7 +409,8 @@ namespace Oxide.Plugins
                     RecordCombatHostility(incident, helicopterAttacker, now);
                     incident.RecordHelicopterDamage(helicopterAttacker.userID,
                         helicopterDamage, healthFraction, now,
-                        _config.AdaptivePressure.HelicopterCombatActivityWindowSeconds);
+                        _config.RaidActivityEscalation
+                            .HelicopterCombatActivityWindowSeconds);
                     incident.HelicopterAttackerOwnerIds.Add(
                         helicopterAttacker.userID);
                     incident.NextIndependentGroupEvaluationAt = 0f;
@@ -451,7 +452,7 @@ namespace Oxide.Plugins
             // spawned admin-test response only half operational. Active event
             // aircraft and test activity are handled above; only discovery of
             // new organic raids is gated by the global switch.
-            if (!_config.Enabled)
+            if (!IsAutomaticProtectionActive())
                 return null;
 
             if (IsExcludedUndergroundRaid(entity))
@@ -483,17 +484,18 @@ namespace Oxide.Plugins
                 if (incident == null || !incident.IsAdminTest || !incident.Qualified
                     || (buildingId != 0
                         ? !incident.ProtectedBuildingIds.Contains(buildingId)
-                        : !incident.ProtectedBoatIds.Contains(boatId))
-                    || !IsAggressorOwner(incident, attacker.userID))
+                        : !incident.ProtectedBoatIds.Contains(boatId)))
                     continue;
 
                 // Admin tests commonly use two structures owned by the same account.
-                // Refresh the simulated raid without reclassifying that protected
-                // structure (or its owner) as a real victim/aggressor asset.
+                // The targeted structure remains protected while every player who
+                // actually damages it is classified as a test aggressor. This makes
+                // a test behave like organic detection without depending on the
+                // configured coverage mode or runtime monitoring state.
                 incident.LastRaidDamageAt = now;
                 incident.LastRaidDamageUtc = UtcNowSeconds();
                 incident.RecordRaidDamage(now,
-                    _config.AdaptivePressure.ActivityWindowSeconds);
+                    _config.RaidActivityEscalation.ActivityWindowSeconds);
                 RecordRaidAggressor(incident, attacker, now);
                 ReactivateFromRaidDamage(incident);
                 return true;
@@ -559,7 +561,7 @@ namespace Oxide.Plugins
             incident.QualifyingHits++;
             incident.QualifyingDamage += damage;
             incident.RecordRaidDamage(now,
-                _config.AdaptivePressure.ActivityWindowSeconds);
+                _config.RaidActivityEscalation.ActivityWindowSeconds);
             RecordRaidAggressor(incident, attacker, now, damage);
 
             // Let the hotspot follow nearby structural damage gradually without allowing one hit
@@ -587,13 +589,62 @@ namespace Oxide.Plugins
 
         private void QualifyIncident(RaidIncident incident)
         {
+            CaptureVictimProtection(incident);
+            if (!ShouldAutomaticallyProtect(incident))
+            {
+                _incidents.Remove(incident);
+                return;
+            }
+
             incident.Qualified = true;
             incident.ResponseLevel = 1;
-            CaptureVictimProtection(incident);
             CreateOrUpdateMarkers(incident);
             BroadcastRaidAlert(incident, "InitialAlert", incident.GetCurrentProfile(_config)?.Name);
             ScheduleHelicopter(incident,
                 _config.RaidDetection.InitialResponseDelaySeconds);
+        }
+
+        private bool IsAutomaticProtectionActive()
+        {
+            return _config != null && _config.ProtectionEnabled
+                && GetCoverageMode() != RaidCoverageMode.Disabled;
+        }
+
+        private RaidCoverageMode GetCoverageMode()
+        {
+            if (_config == null || string.IsNullOrWhiteSpace(_config.CoverageMode))
+                return RaidCoverageMode.AllRaids;
+
+            RaidCoverageMode mode;
+            return Enum.TryParse(_config.CoverageMode, true, out mode)
+                && Enum.IsDefined(typeof(RaidCoverageMode), mode)
+                ? mode : RaidCoverageMode.AllRaids;
+        }
+
+        private bool ShouldAutomaticallyProtect(RaidIncident incident)
+        {
+            RaidCoverageMode mode = GetCoverageMode();
+            if (mode == RaidCoverageMode.Disabled)
+                return false;
+            if (mode == RaidCoverageMode.AllRaids)
+                return true;
+
+            return !HasOnlineVictim(incident);
+        }
+
+        private bool HasOnlineVictim(RaidIncident incident)
+        {
+            if (incident == null || incident.VictimOwnerIds.Count == 0)
+                return false;
+
+            foreach (BasePlayer player in BasePlayer.activePlayerList)
+            {
+                if (player != null && player.IsConnected
+                    && IsVictimOwner(incident, player.userID))
+                    return true;
+            }
+
+            return false;
         }
 
         private void ReactivateFromRaidDamage(RaidIncident incident)
@@ -2025,11 +2076,11 @@ namespace Oxide.Plugins
             int independentGroups = GetRecentIndependentHelicopterAttackerGroups(
                 incident, Time.realtimeSinceStartup);
             float groupMultiplier = independentGroups > 1
-                ? Mathf.Pow(_config.AdaptivePressure
+                ? Mathf.Pow(_config.IndependentAttackerEscalation
                     .AimConeMultiplierPerAdditionalIndependentGroup,
                     independentGroups - 1)
                 : 1f;
-            groupMultiplier = Mathf.Max(_config.AdaptivePressure
+            groupMultiplier = Mathf.Max(_config.IndependentAttackerEscalation
                 .MinimumIndependentGroupAimConeMultiplier, groupMultiplier);
             aimCone *= profile.GunAimConeScale * groupMultiplier;
         }
@@ -2466,27 +2517,32 @@ namespace Oxide.Plugins
 
         private int GetAdaptivePressureStage(RaidIncident incident)
         {
-            if (!_config.AdaptivePressure.Enabled || incident == null)
-                return 1;
+            if (incident == null)
+                return 0;
 
-            int hits = incident.CountRecentRaidHits(Time.realtimeSinceStartup,
-                _config.AdaptivePressure.ActivityWindowSeconds);
+            RaidActivityEscalationConfiguration raid =
+                _config.RaidActivityEscalation;
+            IndependentAttackerEscalationConfiguration groups =
+                _config.IndependentAttackerEscalation;
+            int hits = raid.Enabled
+                ? incident.CountRecentRaidHits(Time.realtimeSinceStartup,
+                    raid.ActivityWindowSeconds) : 0;
             ResponseProfile profile = incident.GetCurrentProfile(_config);
-            bool helicopterCombatEscalated = profile != null
+            bool helicopterCombatEscalated = raid.Enabled && profile != null
                 && Time.realtimeSinceStartup - incident.LastHelicopterDamageAt
-                    <= _config.AdaptivePressure.HelicopterCombatActivityWindowSeconds
+                    <= raid.HelicopterCombatActivityWindowSeconds
                 && incident.LowestHelicopterHealthFraction * 100f
                     <= profile.CombatEscalationHealthRemainingPercent;
             int independentGroups = GetRecentIndependentHelicopterAttackerGroups(
                 incident, Time.realtimeSinceStartup);
             if (helicopterCombatEscalated
-                || hits >= _config.AdaptivePressure.HeavyRaidHitThreshold
-                || independentGroups >= _config.AdaptivePressure
-                    .IndependentGroupsForHeavyPressure)
+                || (raid.Enabled && hits >= raid.HeavyRaidHitThreshold)
+                || (groups.Enabled && independentGroups >=
+                    groups.IndependentGroupsForHeavyPressure))
                 return 3;
-            if (hits >= _config.AdaptivePressure.SustainedRaidHitThreshold
-                || independentGroups >= _config.AdaptivePressure
-                    .IndependentGroupsForSustainedPressure)
+            if ((raid.Enabled && hits >= raid.SustainedRaidHitThreshold)
+                || (groups.Enabled && independentGroups >=
+                    groups.IndependentGroupsForSustainedPressure))
                 return 2;
             return hits > 0 ? 1 : 0;
         }
@@ -2500,7 +2556,7 @@ namespace Oxide.Plugins
             int independentGroups = GetRecentIndependentHelicopterAttackerGroups(
                 incident, Time.realtimeSinceStartup);
             float bonus = Mathf.Max(0, independentGroups - 1)
-                * _config.AdaptivePressure
+                * _config.IndependentAttackerEscalation
                     .BulletAccuracyBonusPerAdditionalIndependentGroup;
             return Mathf.Clamp(profile.BulletAccuracyPercent + bonus, 0f, 100f);
         }
@@ -2508,15 +2564,14 @@ namespace Oxide.Plugins
         private int GetRecentIndependentHelicopterAttackerGroups(
             RaidIncident incident, float now)
         {
-            if (!_config.AdaptivePressure.Enabled
-                || !_config.AdaptivePressure.ScaleForIndependentHelicopterAttackers
+            if (!_config.IndependentAttackerEscalation.Enabled
                 || incident == null)
                 return 0;
 
             if (now < incident.NextIndependentGroupEvaluationAt)
                 return incident.CachedIndependentHelicopterAttackerGroups;
 
-            float oldestAllowed = now - _config.AdaptivePressure
+            float oldestAllowed = now - _config.RaidActivityEscalation
                 .HelicopterCombatActivityWindowSeconds;
             List<ulong> representatives = Facepunch.Pool.Get<List<ulong>>();
             try
@@ -2557,9 +2612,10 @@ namespace Oxide.Plugins
         {
             int stage = GetAdaptivePressureStage(incident);
             float multiplier = stage >= 3
-                ? _config.AdaptivePressure.HeavyRocketCountMultiplier
+                ? _config.RaidActivityEscalation.HeavyRocketCountMultiplier
                 : stage >= 2
-                    ? _config.AdaptivePressure.SustainedRocketCountMultiplier : 1f;
+                    ? _config.RaidActivityEscalation
+                        .SustainedRocketCountMultiplier : 1f;
             return Math.Max(0, Mathf.RoundToInt(profile.MaximumRocketsPerAttack
                 * multiplier));
         }
@@ -2569,9 +2625,10 @@ namespace Oxide.Plugins
         {
             int stage = GetAdaptivePressureStage(incident);
             float multiplier = stage >= 3
-                ? _config.AdaptivePressure.HeavyCooldownMultiplier
+                ? _config.RaidActivityEscalation.HeavyCooldownMultiplier
                 : stage >= 2
-                    ? _config.AdaptivePressure.SustainedCooldownMultiplier : 1f;
+                    ? _config.RaidActivityEscalation
+                        .SustainedCooldownMultiplier : 1f;
             return Mathf.Max(5f, profile.RocketAttackCooldownSeconds * multiplier);
         }
 
@@ -2580,9 +2637,10 @@ namespace Oxide.Plugins
         {
             int stage = GetAdaptivePressureStage(incident);
             float bonus = stage >= 3
-                ? _config.AdaptivePressure.HeavyNapalmBonusPercent
+                ? _config.RaidActivityEscalation.HeavyNapalmBonusPercent
                 : stage >= 2
-                    ? _config.AdaptivePressure.SustainedNapalmBonusPercent : 0f;
+                    ? _config.RaidActivityEscalation
+                        .SustainedNapalmBonusPercent : 0f;
             return Mathf.Clamp(profile.NapalmChancePercent + bonus, 0f, 100f);
         }
 
@@ -3040,8 +3098,9 @@ namespace Oxide.Plugins
                     continue;
 
                 float score = incident.GetThreatScore(candidate.userID, now,
-                    _config.AdaptivePressure.ActivityWindowSeconds,
-                    _config.AdaptivePressure.HelicopterCombatActivityWindowSeconds);
+                    _config.RaidActivityEscalation.ActivityWindowSeconds,
+                    _config.RaidActivityEscalation
+                        .HelicopterCombatActivityWindowSeconds);
                 if (IsStructureCombatantOwner(incident, candidate.userID))
                     score += 250f;
                 if (IsArmedOrThreatening(candidate))
@@ -3402,17 +3461,21 @@ namespace Oxide.Plugins
 
             ResponseProfile profile = incident?.GetCurrentProfile(_config);
             PatrolHelicopter helicopter = ai?.helicopterBase as PatrolHelicopter;
-            bool recentRaidPressure = Time.realtimeSinceStartup
+            bool recentRaidPressure = _config.RaidActivityEscalation.Enabled
+                && Time.realtimeSinceStartup
                 - incident.LastRaidDamageAt
-                    <= _config.AdaptivePressure.StructurePressureSeconds;
-            bool recentEscalatedHelicopterCombat = profile != null
+                    <= _config.RaidActivityEscalation.StructurePressureSeconds;
+            bool recentEscalatedHelicopterCombat =
+                _config.RaidActivityEscalation.Enabled && profile != null
                 && Time.realtimeSinceStartup - incident.LastHelicopterDamageAt
-                    <= _config.AdaptivePressure.HelicopterCombatActivityWindowSeconds
+                    <= _config.RaidActivityEscalation
+                        .HelicopterCombatActivityWindowSeconds
                 && incident.LowestHelicopterHealthFraction * 100f
                     <= profile.CombatEscalationHealthRemainingPercent;
             bool independentGroupPressure =
+                _config.IndependentAttackerEscalation.Enabled &&
                 GetRecentIndependentHelicopterAttackerGroups(incident,
-                    Time.realtimeSinceStartup) >= _config.AdaptivePressure
+                    Time.realtimeSinceStartup) >= _config.IndependentAttackerEscalation
                         .IndependentGroupsForSustainedPressure;
             if (profile == null || !profile.EnableRockets
                 || profile.MaximumRocketsPerAttack <= 0
@@ -3458,8 +3521,9 @@ namespace Oxide.Plugins
                     continue;
 
                 float score = incident.GetThreatScore(userId, now,
-                    _config.AdaptivePressure.ActivityWindowSeconds,
-                    _config.AdaptivePressure.HelicopterCombatActivityWindowSeconds);
+                    _config.RaidActivityEscalation.ActivityWindowSeconds,
+                    _config.RaidActivityEscalation
+                        .HelicopterCombatActivityWindowSeconds);
                 if (IsStructureCombatantOwner(incident, userId))
                     score += 250f;
                 if (visibleTarget)
@@ -3577,8 +3641,11 @@ namespace Oxide.Plugins
             if (!recentlyAggressive && !_config.Targeting.AllowVanillaThreatTargeting)
                 return false;
 
-            if (_config.Targeting.RequireArmedOrThreateningPlayer && !recentlyAggressive
-                && !IsArmedOrThreatening(player))
+            // Confirmed aggressors remain hostile for the configured duration.
+            // Everyone else must satisfy Rust's normal armed/threatening rules;
+            // this is intentionally not configurable because targeting innocent,
+            // unarmed bystanders would violate the plugin's safety model.
+            if (!recentlyAggressive && !IsArmedOrThreatening(player))
                 return false;
 
             return HasHelicopterLineOfSight(ai, player);
@@ -3888,12 +3955,13 @@ namespace Oxide.Plugins
                 return;
             }
 
-            bool wasEnabled = _config.Enabled;
-            _config.Enabled = false;
+            bool wasEnabled = _config.ProtectionEnabled;
+            _config.ProtectionEnabled = false;
             SaveConfig();
             int count = StopAllIncidents(true);
             ClearRaidProgress();
-            Reply(player, wasEnabled ? "SystemDisabled" : "AlreadyDisabled", count);
+            Reply(player, wasEnabled ? "MonitoringStopped"
+                : "MonitoringAlreadyStopped", count);
         }
 
         [ChatCommand("antiraidhelistart")]
@@ -3905,15 +3973,21 @@ namespace Oxide.Plugins
                 return;
             }
 
-            if (_config.Enabled)
+            if (GetCoverageMode() == RaidCoverageMode.Disabled)
             {
-                Reply(player, "AlreadyEnabled");
+                Reply(player, "CannotStartDisabledMode");
                 return;
             }
 
-            _config.Enabled = true;
+            if (_config.ProtectionEnabled)
+            {
+                Reply(player, "MonitoringAlreadyRunning");
+                return;
+            }
+
+            _config.ProtectionEnabled = true;
             SaveConfig();
-            Reply(player, "SystemEnabled");
+            Reply(player, "MonitoringStarted");
         }
 
         [ChatCommand("antiraidhelitest")]
@@ -3949,7 +4023,7 @@ namespace Oxide.Plugins
             level = Mathf.Clamp(level, 1, _config.ResponseProfiles.Count);
 
             RaidIncident incident = StartManualIncident(target.transform.position,
-                level, player.userID);
+                level);
             incident.IsAdminTest = true;
             if (buildingId != 0)
                 incident.ProtectedBuildingIds.Add(buildingId);
@@ -4009,13 +4083,13 @@ namespace Oxide.Plugins
                 return;
             }
 
-            bool wasEnabled = _config.Enabled;
-            _config.Enabled = false;
+            bool wasEnabled = _config.ProtectionEnabled;
+            _config.ProtectionEnabled = false;
             SaveConfig();
             int count = StopAllIncidents(true);
             ClearRaidProgress();
             arg.ReplyWith(string.Format(lang.GetMessage(wasEnabled
-                ? "SystemDisabled" : "AlreadyDisabled", this,
+                ? "MonitoringStopped" : "MonitoringAlreadyStopped", this,
                 player?.UserIDString), count));
         }
 
@@ -4029,16 +4103,23 @@ namespace Oxide.Plugins
                 return;
             }
 
-            if (_config.Enabled)
+            if (GetCoverageMode() == RaidCoverageMode.Disabled)
             {
-                arg.ReplyWith(lang.GetMessage("AlreadyEnabled", this,
+                arg.ReplyWith(lang.GetMessage("CannotStartDisabledMode", this,
                     player?.UserIDString));
                 return;
             }
 
-            _config.Enabled = true;
+            if (_config.ProtectionEnabled)
+            {
+                arg.ReplyWith(lang.GetMessage("MonitoringAlreadyRunning", this,
+                    player?.UserIDString));
+                return;
+            }
+
+            _config.ProtectionEnabled = true;
             SaveConfig();
-            arg.ReplyWith(lang.GetMessage("SystemEnabled", this,
+            arg.ReplyWith(lang.GetMessage("MonitoringStarted", this,
                 player?.UserIDString));
         }
 
@@ -4108,6 +4189,10 @@ namespace Oxide.Plugins
         private string BuildHealthStatusReport()
         {
             var report = new StringBuilder();
+            report.Append("AntiRaidHeli coverage mode: ")
+                .Append(GetCoverageMode())
+                .Append("; automatic monitoring: ")
+                .AppendLine(_config.ProtectionEnabled ? "enabled" : "stopped");
             report.AppendLine("AntiRaidHeli live health status:");
             int liveHelicopters = 0;
 
@@ -4124,7 +4209,7 @@ namespace Oxide.Plugins
                 int independentGroups =
                     GetRecentIndependentHelicopterAttackerGroups(incident, now);
                 int recentRaidHits = incident.CountRecentRaidHits(now,
-                    _config.AdaptivePressure.ActivityWindowSeconds);
+                    _config.RaidActivityEscalation.ActivityWindowSeconds);
                 incident.PruneDestroyedHelicopters();
                 for (int helicopterIndex = 0;
                     helicopterIndex < incident.Helicopters.Count; helicopterIndex++)
@@ -4393,13 +4478,14 @@ namespace Oxide.Plugins
                 ["HostilityExpired"] = "<color=#8cff98><b>Anti-Raid Heli:</b></color> You are no longer raid-hostile. Disarm, strip down, and get out of here before the heli changes its mind.",
                 ["RepairLocked"] = "<color=#ff6b35><b>Anti-Raid Heli:</b></color> This aggressor structure cannot be repaired, upgraded, or expanded while the response chain is active.",
                 ["NoPermission"] = "You do not have permission to use this command.",
-                ["SystemEnabled"] = "AntiRaidHeli protection is now enabled and will remain enabled across reloads and restarts.",
-                ["AlreadyEnabled"] = "AntiRaidHeli protection is already enabled.",
-                ["SystemDisabled"] = "AntiRaidHeli protection is now disabled. Cleaned up {0} active event(s).",
-                ["AlreadyDisabled"] = "AntiRaidHeli protection was already disabled. Cleaned up {0} active event(s).",
+                ["MonitoringStarted"] = "AntiRaidHeli automatic monitoring is now running and will remain running across reloads and restarts.",
+                ["MonitoringAlreadyRunning"] = "AntiRaidHeli automatic monitoring is already running.",
+                ["CannotStartDisabledMode"] = "AntiRaidHeli cannot start because Raid coverage mode is Disabled. Change it to AllRaids or OfflineRaidsOnly in the configuration first. Admin tests remain available.",
+                ["MonitoringStopped"] = "AntiRaidHeli automatic monitoring is now stopped. Cleaned up {0} active event(s).",
+                ["MonitoringAlreadyStopped"] = "AntiRaidHeli automatic monitoring was already stopped. Cleaned up {0} active event(s).",
                 ["ManualTestStarted"] = "Started manual AntiRaidHeli response level {0} at {1}.",
                 ["TestTargetRequired"] = "Look directly at a building belonging to the simulated victim base and try again.",
-                ["TestStarted"] = "Started AntiRaidHeli protection test level {0} at {1}. The targeted building is protected; your other buildings are treated as aggressor structures."
+                ["TestStarted"] = "Started AntiRaidHeli protection test level {0} at {1}. The targeted building is the defended test base; players who damage it and their associated structures become aggressors."
             }, this);
         }
 
@@ -4413,7 +4499,10 @@ namespace Oxide.Plugins
             _config.RaidBaseIdentification ??= new RaidBaseIdentificationConfiguration();
             _config.Targeting ??= new TargetingConfiguration();
             _config.HostilityUi ??= new HostilityUiConfiguration();
-            _config.AdaptivePressure ??= new AdaptivePressureConfiguration();
+            _config.RaidActivityEscalation ??=
+                new RaidActivityEscalationConfiguration();
+            _config.IndependentAttackerEscalation ??=
+                new IndependentAttackerEscalationConfiguration();
             _config.Helicopter ??= new HelicopterConfiguration();
             _config.MapMarker ??= new MapMarkerConfiguration();
             _config.Announcements ??= new AnnouncementConfiguration();
@@ -4430,6 +4519,14 @@ namespace Oxide.Plugins
 
             if (_config.ResponseProfiles.Count == 0)
                 _config.ResponseProfiles = PluginConfiguration.CreateDefaultProfiles();
+
+            RaidCoverageMode coverageMode;
+            if (!Enum.TryParse(_config.CoverageMode, true, out coverageMode)
+                || !Enum.IsDefined(typeof(RaidCoverageMode), coverageMode))
+                coverageMode = RaidCoverageMode.AllRaids;
+            _config.CoverageMode = coverageMode.ToString();
+            if (coverageMode == RaidCoverageMode.Disabled)
+                _config.ProtectionEnabled = false;
 
             // Early development builds could append default response profiles
             // while deserializing an existing config. The current serializer no
@@ -4509,48 +4606,57 @@ namespace Oxide.Plugins
                 _config.HostilityUi.HostileColor, "0.95 0 0.02 0.78");
             _config.HostilityUi.ClearedColor = NormalizeCuiColor(
                 _config.HostilityUi.ClearedColor, "0.10 0.65 0.20 0.82");
-            _config.AdaptivePressure.ActivityWindowSeconds = Mathf.Max(10f,
-                _config.AdaptivePressure.ActivityWindowSeconds);
-            _config.AdaptivePressure.HelicopterCombatActivityWindowSeconds =
-                Mathf.Max(5f, _config.AdaptivePressure
+            _config.RaidActivityEscalation.ActivityWindowSeconds = Mathf.Max(10f,
+                _config.RaidActivityEscalation.ActivityWindowSeconds);
+            _config.RaidActivityEscalation.HelicopterCombatActivityWindowSeconds =
+                Mathf.Max(5f, _config.RaidActivityEscalation
                     .HelicopterCombatActivityWindowSeconds);
-            _config.AdaptivePressure.StructurePressureSeconds = Mathf.Max(5f,
-                _config.AdaptivePressure.StructurePressureSeconds);
-            _config.AdaptivePressure.SustainedRaidHitThreshold = Math.Max(2,
-                _config.AdaptivePressure.SustainedRaidHitThreshold);
-            _config.AdaptivePressure.HeavyRaidHitThreshold = Math.Max(
-                _config.AdaptivePressure.SustainedRaidHitThreshold + 1,
-                _config.AdaptivePressure.HeavyRaidHitThreshold);
-            _config.AdaptivePressure.SustainedRocketCountMultiplier = Mathf.Max(1f,
-                _config.AdaptivePressure.SustainedRocketCountMultiplier);
-            _config.AdaptivePressure.HeavyRocketCountMultiplier = Mathf.Max(
-                _config.AdaptivePressure.SustainedRocketCountMultiplier,
-                _config.AdaptivePressure.HeavyRocketCountMultiplier);
-            _config.AdaptivePressure.SustainedCooldownMultiplier = Mathf.Clamp(
-                _config.AdaptivePressure.SustainedCooldownMultiplier, 0.1f, 1f);
-            _config.AdaptivePressure.HeavyCooldownMultiplier = Mathf.Clamp(
-                _config.AdaptivePressure.HeavyCooldownMultiplier, 0.1f,
-                _config.AdaptivePressure.SustainedCooldownMultiplier);
-            _config.AdaptivePressure.SustainedNapalmBonusPercent = Mathf.Clamp(
-                _config.AdaptivePressure.SustainedNapalmBonusPercent, 0f, 100f);
-            _config.AdaptivePressure.HeavyNapalmBonusPercent = Mathf.Clamp(
-                _config.AdaptivePressure.HeavyNapalmBonusPercent,
-                _config.AdaptivePressure.SustainedNapalmBonusPercent, 100f);
-            _config.AdaptivePressure.IndependentGroupsForSustainedPressure =
-                Math.Max(2, _config.AdaptivePressure
+            _config.RaidActivityEscalation.StructurePressureSeconds = Mathf.Max(5f,
+                _config.RaidActivityEscalation.StructurePressureSeconds);
+            _config.RaidActivityEscalation.SustainedRaidHitThreshold = Math.Max(2,
+                _config.RaidActivityEscalation.SustainedRaidHitThreshold);
+            _config.RaidActivityEscalation.HeavyRaidHitThreshold = Math.Max(
+                _config.RaidActivityEscalation.SustainedRaidHitThreshold + 1,
+                _config.RaidActivityEscalation.HeavyRaidHitThreshold);
+            _config.RaidActivityEscalation.SustainedRocketCountMultiplier =
+                Mathf.Max(1f, _config.RaidActivityEscalation
+                    .SustainedRocketCountMultiplier);
+            _config.RaidActivityEscalation.HeavyRocketCountMultiplier = Mathf.Max(
+                _config.RaidActivityEscalation.SustainedRocketCountMultiplier,
+                _config.RaidActivityEscalation.HeavyRocketCountMultiplier);
+            _config.RaidActivityEscalation.SustainedCooldownMultiplier =
+                Mathf.Clamp(_config.RaidActivityEscalation
+                    .SustainedCooldownMultiplier, 0.1f, 1f);
+            _config.RaidActivityEscalation.HeavyCooldownMultiplier = Mathf.Clamp(
+                _config.RaidActivityEscalation.HeavyCooldownMultiplier, 0.1f,
+                _config.RaidActivityEscalation.SustainedCooldownMultiplier);
+            _config.RaidActivityEscalation.SustainedNapalmBonusPercent =
+                Mathf.Clamp(_config.RaidActivityEscalation
+                    .SustainedNapalmBonusPercent, 0f, 100f);
+            _config.RaidActivityEscalation.HeavyNapalmBonusPercent = Mathf.Clamp(
+                _config.RaidActivityEscalation.HeavyNapalmBonusPercent,
+                _config.RaidActivityEscalation.SustainedNapalmBonusPercent, 100f);
+            _config.IndependentAttackerEscalation
+                .IndependentGroupsForSustainedPressure = Math.Max(2,
+                    _config.IndependentAttackerEscalation
                     .IndependentGroupsForSustainedPressure);
-            _config.AdaptivePressure.IndependentGroupsForHeavyPressure =
-                Math.Max(_config.AdaptivePressure
+            _config.IndependentAttackerEscalation
+                .IndependentGroupsForHeavyPressure = Math.Max(
+                    _config.IndependentAttackerEscalation
                     .IndependentGroupsForSustainedPressure + 1,
-                    _config.AdaptivePressure.IndependentGroupsForHeavyPressure);
-            _config.AdaptivePressure.BulletAccuracyBonusPerAdditionalIndependentGroup =
-                Mathf.Clamp(_config.AdaptivePressure
+                    _config.IndependentAttackerEscalation
+                        .IndependentGroupsForHeavyPressure);
+            _config.IndependentAttackerEscalation
+                .BulletAccuracyBonusPerAdditionalIndependentGroup = Mathf.Clamp(
+                    _config.IndependentAttackerEscalation
                     .BulletAccuracyBonusPerAdditionalIndependentGroup, 0f, 25f);
-            _config.AdaptivePressure.AimConeMultiplierPerAdditionalIndependentGroup =
-                Mathf.Clamp(_config.AdaptivePressure
+            _config.IndependentAttackerEscalation
+                .AimConeMultiplierPerAdditionalIndependentGroup = Mathf.Clamp(
+                    _config.IndependentAttackerEscalation
                     .AimConeMultiplierPerAdditionalIndependentGroup, 0.5f, 1f);
-            _config.AdaptivePressure.MinimumIndependentGroupAimConeMultiplier =
-                Mathf.Clamp(_config.AdaptivePressure
+            _config.IndependentAttackerEscalation
+                .MinimumIndependentGroupAimConeMultiplier = Mathf.Clamp(
+                    _config.IndependentAttackerEscalation
                     .MinimumIndependentGroupAimConeMultiplier, 0.2f, 1f);
             _config.RaidDetection.ResponseMemoryMinutes = Mathf.Max(0f,
                 _config.RaidDetection.ResponseMemoryMinutes);
@@ -4600,8 +4706,6 @@ namespace Oxide.Plugins
             _config.ResponseProfiles.RemoveAll(profile => profile == null);
             if (_config.ResponseProfiles.Count == 0)
                 _config.ResponseProfiles = PluginConfiguration.CreateDefaultProfiles();
-            _config.ResponseProfiles.Sort((left, right) => left.Level.CompareTo(right.Level));
-
             if (_config.ConfigurationVersion < 1)
             {
                 ApplyRocketEscalationDefaults(_config.ResponseProfiles);
@@ -4646,7 +4750,8 @@ namespace Oxide.Plugins
             {
                 ApplyResponseChainV10Defaults(_config.ResponseProfiles);
                 _config.RaidDetection.SecondsBetweenResponseRounds = 5f;
-                _config.AdaptivePressure.HelicopterCombatActivityWindowSeconds = 30f;
+                _config.RaidActivityEscalation
+                    .HelicopterCombatActivityWindowSeconds = 30f;
                 _config.ConfigurationVersion = 10;
             }
             if (_config.ConfigurationVersion < 11)
@@ -4660,7 +4765,7 @@ namespace Oxide.Plugins
                 // v0.6.0 is a controlled public-test build. Upgrades begin
                 // inactive and use the same reduced-health ladder validated on
                 // the TEST server so administrators can supervise each session.
-                _config.Enabled = false;
+                _config.ProtectionEnabled = false;
                 ApplyControlledBetaV12Defaults(_config.ResponseProfiles);
                 _config.ConfigurationVersion = 12;
             }
@@ -4687,11 +4792,82 @@ namespace Oxide.Plugins
                 _config.ConfigurationVersion = 16;
             if (_config.ConfigurationVersion < 17)
                 _config.ConfigurationVersion = 17;
+            if (_config.ConfigurationVersion < 18)
+            {
+                ApplyV18ProfileNames(_config.ResponseProfiles);
+                _config.ConfigurationVersion = 18;
+            }
+            if (_config.ConfigurationVersion < 19)
+            {
+                RepairLegacyResponseTuningV19(_config.ResponseProfiles);
+                _config.ConfigurationVersion = 19;
+            }
 
             foreach (ResponseProfile profile in _config.ResponseProfiles)
                 profile.Validate();
-            for (int i = 0; i < _config.ResponseProfiles.Count; i++)
-                _config.ResponseProfiles[i].Level = i + 1;
+        }
+
+        private static void ApplyV18ProfileNames(List<ResponseProfile> profiles)
+        {
+            string[] formerDefaults =
+            {
+                "Suppression", "Escalation", "Maximum Response", "Final Response"
+            };
+            string[] revisedDefaults =
+            {
+                "Round 1 - Suppression", "Round 2 - Escalation",
+                "Round 3 - Maximum Response", "Round 4 - Final Response"
+            };
+            for (int i = 0; i < profiles.Count && i < revisedDefaults.Length; i++)
+            {
+                ResponseProfile profile = profiles[i];
+                if (profile != null && (string.IsNullOrWhiteSpace(profile.Name)
+                    || string.Equals(profile.Name, formerDefaults[i],
+                        StringComparison.Ordinal)))
+                    profile.Name = revisedDefaults[i];
+            }
+        }
+
+        private static void RepairLegacyResponseTuningV19(
+            List<ResponseProfile> profiles)
+        {
+            if (profiles == null || profiles.Count != MaximumResponseLevels)
+                return;
+
+            float[] standardHealth = { 30000f, 50000f, 80000f, 120000f };
+            int[] standardRockets = { 3, 12, 16, 20 };
+            for (int i = 0; i < profiles.Count; i++)
+            {
+                ResponseProfile profile = profiles[i];
+                if (profile == null
+                    || !Mathf.Approximately(profile.Health, standardHealth[i])
+                    || profile.MaximumRocketsPerAttack != standardRockets[i])
+                    return;
+            }
+
+            bool placeholderAccuracy = true;
+            bool placeholderAimCone = true;
+            bool placeholderHelicopterCounts = true;
+            for (int i = 0; i < profiles.Count; i++)
+            {
+                placeholderAccuracy &= Mathf.Approximately(
+                    profiles[i].BulletAccuracyPercent, 45f);
+                placeholderAimCone &= Mathf.Approximately(
+                    profiles[i].GunAimConeScale, 1f);
+                placeholderHelicopterCounts &= profiles[i].HelicopterCount == 1;
+            }
+
+            float[] accuracy = { 65f, 75f, 85f, 92f };
+            float[] aimCone = { 1f, 0.75f, 0.5f, 0.3f };
+            for (int i = 0; i < profiles.Count; i++)
+            {
+                if (placeholderAccuracy)
+                    profiles[i].BulletAccuracyPercent = accuracy[i];
+                if (placeholderAimCone)
+                    profiles[i].GunAimConeScale = aimCone[i];
+            }
+            if (placeholderHelicopterCounts)
+                profiles[profiles.Count - 1].HelicopterCount = 2;
         }
 
         private static bool HasDuplicatedLegacyResponseProfiles(
@@ -4751,28 +4927,29 @@ namespace Oxide.Plugins
 
         private static void ApplyRocketEscalationDefaults(List<ResponseProfile> profiles)
         {
-            foreach (ResponseProfile profile in profiles)
+            for (int i = 0; i < profiles.Count; i++)
             {
+                ResponseProfile profile = profiles[i];
                 if (profile == null)
                     continue;
 
-                switch (profile.Level)
+                switch (i)
                 {
-                    case 1:
+                    case 0:
                         profile.EnableRockets = true;
                         profile.MaximumRocketsPerAttack = 3;
                         profile.RocketAttackCooldownSeconds = 55f;
                         profile.EnableNapalm = true;
                         profile.NapalmChancePercent = 10f;
                         break;
-                    case 2:
+                    case 1:
                         profile.EnableRockets = true;
                         profile.MaximumRocketsPerAttack = 6;
                         profile.RocketAttackCooldownSeconds = 45f;
                         profile.EnableNapalm = true;
                         profile.NapalmChancePercent = 20f;
                         break;
-                    case 3:
+                    case 2:
                         profile.EnableRockets = true;
                         profile.MaximumRocketsPerAttack = 10;
                         profile.RocketAttackCooldownSeconds = 35f;
@@ -4793,22 +4970,23 @@ namespace Oxide.Plugins
         private static void ApplyAccuracyEscalationDefaults(
             List<ResponseProfile> profiles)
         {
-            foreach (ResponseProfile profile in profiles)
+            for (int i = 0; i < profiles.Count; i++)
             {
+                ResponseProfile profile = profiles[i];
                 if (profile == null)
                     continue;
 
-                switch (profile.Level)
+                switch (i)
                 {
-                    case 1:
+                    case 0:
                         profile.BulletAccuracyPercent = 65f;
                         profile.BulletSpeed = 300;
                         break;
-                    case 2:
+                    case 1:
                         profile.BulletAccuracyPercent = 75f;
                         profile.BulletSpeed = 350;
                         break;
-                    case 3:
+                    case 2:
                         profile.BulletAccuracyPercent = 85f;
                         profile.BulletSpeed = 400;
                         break;
@@ -4823,20 +5001,21 @@ namespace Oxide.Plugins
         private static void ApplyShelterPressureDefaults(
             List<ResponseProfile> profiles)
         {
-            foreach (ResponseProfile profile in profiles)
+            for (int i = 0; i < profiles.Count; i++)
             {
+                ResponseProfile profile = profiles[i];
                 if (profile == null)
                     continue;
 
-                switch (profile.Level)
+                switch (i)
                 {
-                    case 1:
+                    case 0:
                         profile.RocketAttackCooldownSeconds = 30f;
                         break;
-                    case 2:
+                    case 1:
                         profile.RocketAttackCooldownSeconds = 25f;
                         break;
-                    case 3:
+                    case 2:
                         profile.RocketAttackCooldownSeconds = 20f;
                         break;
                     default:
@@ -4897,7 +5076,6 @@ namespace Oxide.Plugins
                 if (profile == null)
                     continue;
 
-                profile.EnableMultiHelicopterResponse = i == 3;
                 profile.HelicopterCount = i == 3 ? 2 : 1;
                 switch (i)
                 {
@@ -4988,10 +5166,20 @@ namespace Oxide.Plugins
         private sealed class PluginConfiguration
         {
             [JsonProperty("Configuration version")]
-            public int ConfigurationVersion = 17;
+            public int ConfigurationVersion = 19;
 
+            [JsonProperty("Raid coverage mode (AllRaids, OfflineRaidsOnly, or Disabled)")]
+            public string CoverageMode = "AllRaids";
+
+            [JsonProperty("Automatic protection monitoring enabled (managed by admin start and stop commands)")]
+            public bool ProtectionEnabled = false;
+
+            // Read the former field during migration without writing it back.
             [JsonProperty("Enabled")]
-            public bool Enabled = false;
+            private bool LegacyEnabled
+            {
+                set { ProtectionEnabled = value; }
+            }
 
             [JsonProperty("Raid detection")]
             public RaidDetectionConfiguration RaidDetection = new RaidDetectionConfiguration();
@@ -5007,12 +5195,41 @@ namespace Oxide.Plugins
             public HostilityUiConfiguration HostilityUi =
                 new HostilityUiConfiguration();
 
+            [JsonProperty("Continued raid activity escalation")]
+            public RaidActivityEscalationConfiguration RaidActivityEscalation =
+                new RaidActivityEscalationConfiguration();
+
+            [JsonProperty("Independent attacker-group escalation")]
+            public IndependentAttackerEscalationConfiguration
+                IndependentAttackerEscalation =
+                    new IndependentAttackerEscalationConfiguration();
+
+            // Read v17's combined section during migration without writing it back.
             [JsonProperty("Adaptive anti-raid pressure")]
-            public AdaptivePressureConfiguration AdaptivePressure =
-                new AdaptivePressureConfiguration();
+            private LegacyAdaptivePressureConfiguration LegacyAdaptivePressure
+            {
+                set
+                {
+                    if (value == null)
+                        return;
+                    RaidActivityEscalation = value.ToRaidActivityEscalation();
+                    IndependentAttackerEscalation =
+                        value.ToIndependentAttackerEscalation();
+                }
+            }
+
+            [JsonProperty("Helicopter spawn, patrol, and crash behavior")]
+            public HelicopterConfiguration Helicopter = new HelicopterConfiguration();
 
             [JsonProperty("Helicopter patrol")]
-            public HelicopterConfiguration Helicopter = new HelicopterConfiguration();
+            private HelicopterConfiguration LegacyHelicopter
+            {
+                set
+                {
+                    if (value != null)
+                        Helicopter = value;
+                }
+            }
 
             [JsonProperty("Map marker")]
             public MapMarkerConfiguration MapMarker = new MapMarkerConfiguration();
@@ -5035,8 +5252,7 @@ namespace Oxide.Plugins
                 {
                     new ResponseProfile
                     {
-                        Level = 1,
-                        Name = "Suppression",
+                        Name = "Round 1 - Suppression",
                         Health = 30000f,
                         MainRotorHealth = 2700f,
                         TailRotorHealth = 1500f,
@@ -5055,8 +5271,7 @@ namespace Oxide.Plugins
                     },
                     new ResponseProfile
                     {
-                        Level = 2,
-                        Name = "Escalation",
+                        Name = "Round 2 - Escalation",
                         Health = 50000f,
                         MainRotorHealth = 4500f,
                         TailRotorHealth = 2500f,
@@ -5077,8 +5292,7 @@ namespace Oxide.Plugins
                     },
                     new ResponseProfile
                     {
-                        Level = 3,
-                        Name = "Maximum Response",
+                        Name = "Round 3 - Maximum Response",
                         Health = 80000f,
                         MainRotorHealth = 7200f,
                         TailRotorHealth = 4000f,
@@ -5099,14 +5313,12 @@ namespace Oxide.Plugins
                     },
                     new ResponseProfile
                     {
-                        Level = 4,
-                        Name = "Final Response",
+                        Name = "Round 4 - Final Response",
                         Health = 120000f,
                         MainRotorHealth = 10800f,
                         TailRotorHealth = 6000f,
                         CombatEscalationHealthRemainingPercent = 85f,
                         LootCratesOnDeath = 3,
-                        EnableMultiHelicopterResponse = true,
                         HelicopterCount = 2,
                         BulletDamage = 50f,
                         BulletSpeed = 450,
@@ -5151,8 +5363,14 @@ namespace Oxide.Plugins
             [JsonProperty("Seconds between defeated response rounds (0 = immediate)")]
             public float SecondsBetweenResponseRounds = 5f;
 
-            [JsonProperty("End event after no qualifying structure raid damage for seconds")]
+            [JsonProperty("Pause response after no raid damage or helicopter combat for seconds (progress remains remembered)")]
             public float RaidInactivitySeconds = 300f;
+
+            [JsonProperty("End event after no qualifying structure raid damage for seconds")]
+            private float LegacyRaidInactivitySeconds
+            {
+                set { RaidInactivitySeconds = value; }
+            }
 
             [JsonProperty("Remember paused response progress minutes (0 = until wipe)")]
             public float ResponseMemoryMinutes = 360f;
@@ -5220,11 +5438,14 @@ namespace Oxide.Plugins
             [JsonProperty("Allow vanilla threat targeting of armed non-aggressors in the danger zone")]
             public bool AllowVanillaThreatTargeting = true;
 
-            [JsonProperty("Require players to satisfy Rust's armed or threatening check")]
-            public bool RequireArmedOrThreateningPlayer = true;
+            [JsonProperty("Minimum native threat level (0-1)")]
+            public float MinimumNativeThreatLevel = 0.5f;
 
             [JsonProperty("Minimum native threat level")]
-            public float MinimumNativeThreatLevel = 0.5f;
+            private float LegacyMinimumNativeThreatLevel
+            {
+                set { MinimumNativeThreatLevel = value; }
+            }
 
             [JsonProperty("Raid and combat hostility duration seconds")]
             public float HostilitySeconds = 180f;
@@ -5233,7 +5454,109 @@ namespace Oxide.Plugins
             public bool SendPrivateHostilityCountdown = true;
         }
 
-        private sealed class AdaptivePressureConfiguration
+        private sealed class RaidActivityEscalationConfiguration
+        {
+            [JsonProperty("Enabled")]
+            public bool Enabled = true;
+
+            [JsonProperty("Raid activity measurement window seconds")]
+            public float ActivityWindowSeconds = 60f;
+
+            [JsonProperty("Helicopter combat activity window seconds")]
+            public float HelicopterCombatActivityWindowSeconds = 30f;
+
+            [JsonProperty("Stop attacking hostile structures after no raid damage for seconds")]
+            public float StructurePressureSeconds = 30f;
+
+            [JsonProperty("Sustained raid hit threshold per activity window")]
+            public int SustainedRaidHitThreshold = 4;
+
+            [JsonProperty("Heavy raid hit threshold per activity window")]
+            public int HeavyRaidHitThreshold = 8;
+
+            [JsonProperty("Sustained pressure rocket count multiplier")]
+            public float SustainedRocketCountMultiplier = 1.5f;
+
+            [JsonProperty("Sustained raid rocket count multiplier")]
+            private float LegacySustainedRaidRocketCountMultiplier
+            {
+                set { SustainedRocketCountMultiplier = value; }
+            }
+
+            [JsonProperty("Heavy pressure rocket count multiplier")]
+            public float HeavyRocketCountMultiplier = 2f;
+
+            [JsonProperty("Heavy raid rocket count multiplier")]
+            private float LegacyHeavyRaidRocketCountMultiplier
+            {
+                set { HeavyRocketCountMultiplier = value; }
+            }
+
+            [JsonProperty("Sustained pressure rocket cooldown multiplier")]
+            public float SustainedCooldownMultiplier = 0.7f;
+
+            [JsonProperty("Sustained raid rocket cooldown multiplier")]
+            private float LegacySustainedRaidRocketCooldownMultiplier
+            {
+                set { SustainedCooldownMultiplier = value; }
+            }
+
+            [JsonProperty("Heavy pressure rocket cooldown multiplier")]
+            public float HeavyCooldownMultiplier = 0.45f;
+
+            [JsonProperty("Heavy raid rocket cooldown multiplier")]
+            private float LegacyHeavyRaidRocketCooldownMultiplier
+            {
+                set { HeavyCooldownMultiplier = value; }
+            }
+
+            [JsonProperty("Sustained pressure napalm bonus percent")]
+            public float SustainedNapalmBonusPercent = 10f;
+
+            [JsonProperty("Sustained raid napalm bonus percent")]
+            private float LegacySustainedRaidNapalmBonusPercent
+            {
+                set { SustainedNapalmBonusPercent = value; }
+            }
+
+            [JsonProperty("Heavy pressure napalm bonus percent")]
+            public float HeavyNapalmBonusPercent = 25f;
+
+            [JsonProperty("Heavy raid napalm bonus percent")]
+            private float LegacyHeavyRaidNapalmBonusPercent
+            {
+                set { HeavyNapalmBonusPercent = value; }
+            }
+        }
+
+        private sealed class IndependentAttackerEscalationConfiguration
+        {
+            [JsonProperty("Enabled")]
+            public bool Enabled = true;
+
+            [JsonProperty("Scale aggression for independent groups attacking the helicopter")]
+            private bool LegacyScaleForIndependentHelicopterAttackers
+            {
+                set { Enabled = value; }
+            }
+
+            [JsonProperty("Independent groups required for sustained pressure")]
+            public int IndependentGroupsForSustainedPressure = 2;
+
+            [JsonProperty("Independent groups required for heavy pressure")]
+            public int IndependentGroupsForHeavyPressure = 3;
+
+            [JsonProperty("Bullet accuracy bonus per additional independent group percent")]
+            public float BulletAccuracyBonusPerAdditionalIndependentGroup = 5f;
+
+            [JsonProperty("Aim cone multiplier per additional independent group")]
+            public float AimConeMultiplierPerAdditionalIndependentGroup = 0.85f;
+
+            [JsonProperty("Minimum independent-group aim cone multiplier")]
+            public float MinimumIndependentGroupAimConeMultiplier = 0.55f;
+        }
+
+        private sealed class LegacyAdaptivePressureConfiguration
         {
             [JsonProperty("Enabled")]
             public bool Enabled = true;
@@ -5288,6 +5611,45 @@ namespace Oxide.Plugins
 
             [JsonProperty("Minimum independent-group aim cone multiplier")]
             public float MinimumIndependentGroupAimConeMultiplier = 0.55f;
+
+            public RaidActivityEscalationConfiguration ToRaidActivityEscalation()
+            {
+                return new RaidActivityEscalationConfiguration
+                {
+                    Enabled = Enabled,
+                    ActivityWindowSeconds = ActivityWindowSeconds,
+                    HelicopterCombatActivityWindowSeconds =
+                        HelicopterCombatActivityWindowSeconds,
+                    StructurePressureSeconds = StructurePressureSeconds,
+                    SustainedRaidHitThreshold = SustainedRaidHitThreshold,
+                    HeavyRaidHitThreshold = HeavyRaidHitThreshold,
+                    SustainedRocketCountMultiplier = SustainedRocketCountMultiplier,
+                    HeavyRocketCountMultiplier = HeavyRocketCountMultiplier,
+                    SustainedCooldownMultiplier = SustainedCooldownMultiplier,
+                    HeavyCooldownMultiplier = HeavyCooldownMultiplier,
+                    SustainedNapalmBonusPercent = SustainedNapalmBonusPercent,
+                    HeavyNapalmBonusPercent = HeavyNapalmBonusPercent
+                };
+            }
+
+            public IndependentAttackerEscalationConfiguration
+                ToIndependentAttackerEscalation()
+            {
+                return new IndependentAttackerEscalationConfiguration
+                {
+                    Enabled = Enabled && ScaleForIndependentHelicopterAttackers,
+                    IndependentGroupsForSustainedPressure =
+                        IndependentGroupsForSustainedPressure,
+                    IndependentGroupsForHeavyPressure =
+                        IndependentGroupsForHeavyPressure,
+                    BulletAccuracyBonusPerAdditionalIndependentGroup =
+                        BulletAccuracyBonusPerAdditionalIndependentGroup,
+                    AimConeMultiplierPerAdditionalIndependentGroup =
+                        AimConeMultiplierPerAdditionalIndependentGroup,
+                    MinimumIndependentGroupAimConeMultiplier =
+                        MinimumIndependentGroupAimConeMultiplier
+                };
+            }
         }
 
         private sealed class HostilityUiConfiguration
@@ -5433,11 +5795,11 @@ namespace Oxide.Plugins
 
         private sealed class ResponseProfile
         {
-            [JsonProperty("Level")]
-            public int Level = 1;
+            [JsonIgnore]
+            private bool? _legacyMultiHelicopterEnabled;
 
             [JsonProperty("Name")]
-            public string Name = "Suppression";
+            public string Name = "Response";
 
             [JsonProperty("Health")]
             public float Health = 30000f;
@@ -5454,11 +5816,26 @@ namespace Oxide.Plugins
             [JsonProperty("Loot crates dropped when destroyed")]
             public int LootCratesOnDeath = 1;
 
-            [JsonProperty("Enable multi-helicopter response")]
-            public bool EnableMultiHelicopterResponse;
+            [JsonProperty("Number of helicopters deployed for this specific round (1-3; 1 = single helicopter)")]
+            public int HelicopterCount = 1;
+
+            [JsonProperty("Number of helicopters in this round (1-3; 1 disables multi-heli)")]
+            private int LegacyPerRoundHelicopterCount
+            {
+                set { HelicopterCount = value; }
+            }
 
             [JsonProperty("Number of helicopters in this response (1-3)")]
-            public int HelicopterCount = 1;
+            private int LegacyHelicopterCount
+            {
+                set { HelicopterCount = value; }
+            }
+
+            [JsonProperty("Enable multi-helicopter response")]
+            private bool LegacyMultiHelicopterEnabled
+            {
+                set { _legacyMultiHelicopterEnabled = value; }
+            }
 
             [JsonProperty("Bullet damage")]
             public float BulletDamage = 20f;
@@ -5466,11 +5843,23 @@ namespace Oxide.Plugins
             [JsonProperty("Bullet speed")]
             public int BulletSpeed = 250;
 
-            [JsonProperty("Bullet accuracy percent")]
+            [JsonProperty("Successful bullet damage chance percent (0-100)")]
             public float BulletAccuracyPercent = 45f;
 
-            [JsonProperty("Gun aim cone scale (lower = tighter physical spread)")]
+            [JsonProperty("Bullet accuracy percent")]
+            private float LegacyBulletAccuracyPercent
+            {
+                set { BulletAccuracyPercent = value; }
+            }
+
+            [JsonProperty("Gun aim cone scale (0.05-3; lower = tighter physical spread)")]
             public float GunAimConeScale = 1f;
+
+            [JsonProperty("Gun aim cone scale (lower = tighter physical spread)")]
+            private float LegacyGunAimConeScale
+            {
+                set { GunAimConeScale = value; }
+            }
 
             [JsonProperty("Gun fire rate seconds")]
             public float GunFireRate = 0.125f;
@@ -5513,14 +5902,20 @@ namespace Oxide.Plugins
 
             public void Validate()
             {
-                Level = Math.Max(1, Level);
-                Name = string.IsNullOrWhiteSpace(Name) ? "Response " + Level : Name;
+                Name = string.IsNullOrWhiteSpace(Name) ? "Response" : Name;
                 Health = Mathf.Max(1000f, Health);
                 MainRotorHealth = Mathf.Max(1f, MainRotorHealth);
                 TailRotorHealth = Mathf.Max(1f, TailRotorHealth);
                 CombatEscalationHealthRemainingPercent = Mathf.Clamp(
                     CombatEscalationHealthRemainingPercent, 1f, 100f);
                 LootCratesOnDeath = Mathf.Clamp(LootCratesOnDeath, 0, 12);
+                if (_legacyMultiHelicopterEnabled.HasValue)
+                {
+                    if (!_legacyMultiHelicopterEnabled.Value)
+                        HelicopterCount = 1;
+                    else if (HelicopterCount < 2)
+                        HelicopterCount = 2;
+                }
                 HelicopterCount = Mathf.Clamp(HelicopterCount, 1, 3);
                 BulletDamage = Mathf.Max(0f, BulletDamage);
                 BulletSpeed = Math.Max(1, BulletSpeed);
@@ -5541,8 +5936,7 @@ namespace Oxide.Plugins
 
             public int GetHelicopterCount()
             {
-                return EnableMultiHelicopterResponse
-                    ? Mathf.Clamp(HelicopterCount, 1, 3) : 1;
+                return Mathf.Clamp(HelicopterCount, 1, 3);
             }
         }
 
@@ -5596,6 +5990,13 @@ namespace Oxide.Plugins
         #endregion
 
         #region Runtime models
+
+        private enum RaidCoverageMode
+        {
+            Disabled,
+            OfflineRaidsOnly,
+            AllRaids
+        }
 
         private enum CrashSurfaceType
         {
