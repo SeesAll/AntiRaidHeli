@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.6.8 - 2026-10-07
+
+- Completed a start-to-finish production-hardening pass covering incident lifecycle, cleanup, persistence, configuration validation, targeting, escalation, compatibility hooks, and hot-path allocations.
+- Added independent-group combat scaling: unrelated players or clans attacking an event helicopter now increase rocket/napalm pressure, bullet accuracy, and physical aim accuracy without creating duplicate raid incidents or extra helicopters.
+- Made nearby structures belonging to any helicopter combatant valid response targets inside the danger zone, including helper raid bases and the protected base only after one of its associated players attacks the helicopter. Uninvolved victim and third-party property remains protected.
+- Extended structure rocket-strafe authorization to helper and defender combatant shelters; a stale aggressor-only check could previously select one of these shelters and then reject the actual pass.
+- Fixed the master adaptive-pressure switch so disabling it also disables independent-group bullet and aim scaling.
+- Allowed deliberately spawned administrator test incidents to retain their complete damage filtering, RaidProtection compatibility, hostility, and telemetry behavior while automatic raid detection is disabled.
+- Added defensive repair of individually null map-marker color entries while preserving valid administrator customization.
+- Replaced per-projectile health-telemetry allocations and next-tick callbacks with one-second aggregated sampling. Heavy firefights now retain hit counts, incoming-damage totals, observed body/rotor loss, and health-reset detection without scheduling work for every bullet.
+- Rate-limited repeated unexpected-health warnings per helicopter to prevent log flooding when an incompatible plugin continually restores health.
+- Suppressed repeated NoEscape compatibility warnings until a call succeeds, preventing an incompatible optional API from logging once per helicopter hit.
+- Updated the RaidProtection compatibility description and runtime behavior to match the expanded combatant-property rules.
+
 ## 0.6.2 - 2026-10-07
 
 - Promoted the verified response-health ladder to 30,000 / 50,000 / 80,000 / 120,000 health across rounds 1–4; both final-round helicopters independently receive 120,000 health.

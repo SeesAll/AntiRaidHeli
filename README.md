@@ -2,7 +2,7 @@
 
 AntiRaidHeli detects active player base raids and deploys escalating patrol helicopters over the raid zone. Armed players inside the marked danger area receive vanilla-style helicopter treatment, while confirmed raid aggressors face persistent suppression and attacks against their raid base. Destroying a helicopter earns its normal wreckage and loot, but also triggers the next response round after a short configurable delay.
 
-Version 0.6.2 remains administrator-controlled while live balancing continues. Automatic raid detection is disabled after installation or upgrade until an administrator runs `/antiraidhelistart`. That choice is saved across reloads and restarts. `/antiraidstop` disables protection again and immediately cleans every active AntiRaidHeli event, marker, timer, and hostility state.
+Version 0.6.8 remains administrator-controlled while live balancing continues. Automatic raid detection is disabled after installation or upgrade until an administrator runs `/antiraidhelistart`. That choice is saved across reloads and restarts. `/antiraidstop` disables protection again and immediately cleans every active AntiRaidHeli event, marker, timer, and hostility state. Administrator test incidents remain fully functional while automatic detection is disabled.
 
 ## Current response sequence
 
@@ -17,7 +17,7 @@ Gun accuracy and projectile speed scale with each response level. The default pr
 
 When a recorded aggressor hides inside a confirmed raid base and continues attacking the victim base, the helicopter makes repeated rocket or napalm passes against that hostile shelter. Default rocket-pass cooldowns scale from 30 seconds at Suppression to 10 seconds at Final Response.
 
-Rocket pressure adapts to both raid activity and resistance against the helicopter. Sustained structural damage increases rocket count, shortens the effective cooldown, and raises napalm probability. Continued helicopter damage triggers the heavy-pressure stage once the current response falls below its configurable remaining-health threshold—50%, 65%, 75%, and 85% by default across rounds 1–4. Pressure decays when attackers stop, preserving a real surrender path.
+Rocket pressure adapts to both raid activity and resistance against the helicopter. Sustained structural damage increases rocket count, shortens the effective cooldown, and raises napalm probability. Continued helicopter damage triggers the heavy-pressure stage once the current response falls below its configurable remaining-health threshold—50%, 65%, 75%, and 85% by default across rounds 1–4. Two independent groups attacking the helicopter trigger sustained pressure and three trigger heavy pressure by default. Each additional group also improves effective and physical gun accuracy within configurable limits. Pressure decays when attackers stop, preserving a real surrender path.
 
 Helicopter progression is defeat-based. Waiting causes the response to pause rather than count as a victory. Renewed structural damage restores the same level with its saved remaining health. Destroying a level proves continued aggression and automatically deploys the next response after a configurable five-second delay. Response state—including a pending inter-round deployment—is remembered for six hours by default and survives plugin reloads and server restarts. Defeating all four levels grants clearance for the continuing raid session.
 
@@ -44,13 +44,13 @@ Damage by the structure owner, authorized Tool Cupboard users, native teammates,
 - Raid-hostile players receive a configurable right-side CUI countdown below NoEscape's default raid-block indicator, with a matching compact helicopter silhouette, a small `ROUND` caption, and current/total response indicator such as `1/4` through `4/4`, followed by a brief cleared state and private retreat message.
 - Ordinary armed players use Rust's native threat rules and can disarm to disengage without being classified as raiders.
 - Firearms and other weapon-category items carried in the belt explicitly count as armed even when Rust's transient native threat score is low.
-- Attacking the helicopter or another player creates temporary combat hostility but does not by itself expose an unrelated player's structures to rocket damage. Threat scoring prioritizes active raiders and major damage sources while allowing multi-helicopter rounds to split targets.
+- Attacking the helicopter or another player creates temporary combat hostility. A helicopter attacker exposes only property associated with that attacker inside the danger zone; unrelated property remains protected. Threat scoring prioritizes active raiders and major damage sources while allowing multi-helicopter rounds to split targets.
 - Targets must also be alive, connected, visible, outside safe zones, inside the danger zone, and satisfy the configured threat rules.
 - Solid terrain, buildings, and deployables break line of sight.
 - SmartRecon invisibility is supported when SmartRecon is installed.
-- Rocket strafes target recorded raid aggressors rather than uninvolved defenders.
-- A recent aggressor hiding in a confirmed hostile raid base can trigger a structure strafe; protected victim and ambiguous property still cannot be damaged by the event helicopter.
-- Victim-owned building pieces, defenses, and deployables are protected from plugin helicopter damage.
+- Rocket strafes target recorded raid aggressors and other players who actively attack the event helicopter, rather than uninvolved defenders or bystanders.
+- A recent combatant hiding in an associated base can trigger a structure strafe. Ambiguous and unrelated property still cannot be damaged by the event helicopter.
+- Victim-owned building pieces, defenses, and deployables remain protected unless a victim owner, authorized occupant, teammate, clan member, or recognized friend attacks the response helicopter from inside the danger zone.
 - Aggressor-owned structures remain damageable even without a Tool Cupboard.
 - Recently constructed third-party raid bases can be classified as hostile when aggressors actively occupy them.
 
@@ -74,7 +74,7 @@ The generated configuration is intentionally divided into related sections:
 - `Raid base identification and structure protection` controls recent-building history and how occupied raid bases become valid helicopter targets.
 - `Player targeting` controls the danger zone, armed-player behavior, and the raid-hostility duration.
 - `Raid hostility screen indicator` controls the NoEscape-style HUD alert and its position/colors.
-- `Adaptive anti-raid pressure` controls how continued raiding and attacks on the helicopter increase rocket and napalm pressure.
+- `Adaptive anti-raid pressure` controls how continued raiding and attacks on the helicopter increase rocket/napalm pressure and how multiple independent attacking groups improve gun accuracy.
 - `Helicopter patrol` controls spawn mode, approach, patrol area, optional lifetime, and the randomized dry-land crash-distance ring.
 - `Map marker` and `Announcements` control player-facing map/chat information.
 - `Escalating response profiles` contains the ordered health and weapon settings for every response level.
@@ -122,4 +122,4 @@ The HUD helicopter image is embedded in the plugin and stored through Rust's own
 
 ## Performance design
 
-Raid damage is filtered with inexpensive checks before an incident is created. Construction is stored once per building rather than once per entity, expired construction and hostility records are pruned, and data is written in batches. Active incidents are maintained once per second, target scanning is limited to active players, and only plugin-owned helicopters receive custom behavior. The default maximum is two simultaneous raid zones.
+Raid damage is filtered with inexpensive checks before an incident is created. Construction is stored once per building rather than once per entity, expired construction and hostility records are pruned, and data is written in batches. Active incidents are maintained once per second, target scanning is limited to active players, and only plugin-owned helicopters receive custom behavior. Combat-group evaluation is cached, pooled collections are used in recurring classification work, and health diagnostics aggregate projectile hits instead of allocating and scheduling one callback per shot. The default maximum is two simultaneous raid zones.
