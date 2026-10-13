@@ -210,7 +210,9 @@ antiraidheli.test [level]
 
 ## Installation
 
-Place `AntiRaidHeli.cs` in the server's `oxide/plugins` directory. The configuration is generated at `oxide/config/AntiRaidHeli.json` and is safely migrated when settings are renamed or reorganized. Version 0.6.10 retains the existing runtime enabled/stopped choice, defaults coverage to `AllRaids`, and keeps fresh installations stopped until an administrator deliberately starts monitoring. Its RaidProtection integration tracks event rockets and napalm through their complete lifetime so only confirmed aggressor/combatant structures bypass external protection.
+Place `AntiRaidHeli.cs` in the server's `oxide/plugins` directory. The configuration is generated at `oxide/config/AntiRaidHeli.json` and is safely migrated when settings are renamed or reorganized. Version 0.6.13 retains the existing runtime enabled/stopped choice, defaults coverage to `AllRaids`, and keeps fresh installations stopped until an administrator deliberately starts monitoring. Its RaidProtection integration tracks event rockets and napalm through their complete lifetime so only confirmed aggressor/combatant structures bypass external protection. Native strafe requests overlapping the defended victim property are rejected before rockets are launched, and the live status report separates incoming bullet, explosive, heat, and other damage so incendiary behavior can be verified during testing.
+
+Player-facing chat alerts, private countdown messages, command feedback, and the hostility HUD are localized in English (`en`), French (`fr`), Russian (`ru`), and Ukrainian (`uk`). Global alerts are formatted separately for each connected player using that player's Rust/uMod language selection; unsupported languages fall back to English. Shared map-marker labels and administrator-customized response names remain server-defined because those objects are not player-specific.
 
 The HUD helicopter image is embedded in the plugin and stored through Rust's own file storage while loaded. It does not require ImageLibrary or an external image host and is removed from file storage when the plugin unloads.
 

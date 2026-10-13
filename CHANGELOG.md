@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.6.13 - 2026-10-12
+
+- Added complete English, French, Russian, and Ukrainian localization for global raid alerts, private hostility countdowns, repair restrictions, administrator feedback, and the hostility HUD.
+- Changed global announcements from one server-language broadcast into per-player delivery so each connected player receives the message selected by their own Rust/uMod language setting.
+- Added localized names for the four default response rounds while preserving administrator-customized response names unchanged.
+- Added English fallback through uMod's language system for players using any language without a bundled translation.
+
+## 0.6.12 - 2026-10-07
+
+- Prevented Rust's native helicopter AI from initiating a rocket or napalm strafe whose requested impact position overlaps the protected victim property.
+- Added a localized protected-building/boat check around every proposed strafe position, plus a strict center safeguard for administrator-selected test bases.
+- Added a live diagnostic count for protected-victim strafes rejected by `/antiraidhelistatus`.
+
+## 0.6.11 - 2026-10-07
+
+- Hardened attacking-player resolution for incendiary rockets and secondary fire by inspecting the initiator, weapon, and weapon prefab independently and following deeper creator chains.
+- Expanded live helicopter health telemetry into bullet, explosive, heat, and other damage totals so incendiary damage can be verified directly instead of inferred from the overall health bar.
+- Updated the RaidProtection compatibility contract so its companion integration can ask AntiRaidHeli about secondary napalm/fire hits that no longer carry a recognizable vanilla helicopter prefab name.
+
 ## 0.6.10 - 2026-10-07
 
 - Added explicit tracking for rockets, napalm fireballs, and spread fire created by AntiRaidHeli aircraft so downstream damage remains associated with the correct raid incident even when Rust provides an incomplete creator chain.

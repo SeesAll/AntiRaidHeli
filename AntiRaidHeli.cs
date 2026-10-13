@@ -13,7 +13,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("AntiRaidHeli", "SeesAll", "0.6.10")]
+    [Info("AntiRaidHeli", "SeesAll", "0.6.13")]
     [Description("Deploys escalating patrol helicopters over active player raids.")]
     public class AntiRaidHeli : RustPlugin
     {
@@ -79,6 +79,7 @@ namespace Oxide.Plugins
         private int _raidProtectionBypassesGranted;
         private int _raidProtectionBypassesDeniedUnresolved;
         private int _raidProtectionBypassesDeniedProtected;
+        private int _protectedVictimStrafesRejected;
         private uint _hostilityIconCrc;
         private Harmony _harmony;
         private MethodInfo _deathEnterMethod;
@@ -405,7 +406,7 @@ namespace Oxide.Plugins
                 BasePlayer helicopterAttacker = ResolveAttackingPlayer(info);
                 if (incident != null && helicopterAttacker != null)
                     RecordHelicopterDamageTelemetry(incident, damagedHelicopter,
-                        Mathf.Max(0f, info.damageTypes.Total()));
+                        info);
                 if (incident != null && helicopterAttacker != null
                     && IsInsideDangerZone(incident, helicopterAttacker.transform.position))
                 {
@@ -698,31 +699,47 @@ namespace Oxide.Plugins
             if (player != null)
                 return player;
 
-            BaseEntity source = info.Initiator ?? info.Weapon ?? info.WeaponPrefab;
-            player = source as BasePlayer;
+            BaseEntity initiator = info.Initiator as BaseEntity;
+            player = ResolvePlayerFromDamageSource(initiator);
             if (player != null)
                 return player;
 
-            // Explosive projectiles commonly retain the firing player through
-            // creatorEntity or their parent entity even when InitiatorPlayer is
-            // absent. Resolve those links before falling back to OwnerID.
-            player = source?.creatorEntity as BasePlayer;
-            if (player != null)
-                return player;
+            BaseEntity weapon = info.Weapon as BaseEntity;
+            if (!ReferenceEquals(weapon, initiator))
+            {
+                player = ResolvePlayerFromDamageSource(weapon);
+                if (player != null)
+                    return player;
+            }
 
-            player = source?.GetParentEntity() as BasePlayer;
-            if (player != null)
-                return player;
+            BaseEntity weaponPrefab = info.WeaponPrefab as BaseEntity;
+            return ReferenceEquals(weaponPrefab, initiator)
+                || ReferenceEquals(weaponPrefab, weapon)
+                ? null : ResolvePlayerFromDamageSource(weaponPrefab);
+        }
 
-            ulong ownerId = source?.OwnerID ?? 0UL;
-            if (!ownerId.IsSteamId() && info.Weapon != null)
-                ownerId = info.Weapon.OwnerID;
-            if (!ownerId.IsSteamId() && info.WeaponPrefab != null)
-                ownerId = info.WeaponPrefab.OwnerID;
+        private static BasePlayer ResolvePlayerFromDamageSource(BaseEntity source)
+        {
+            for (int depth = 0; source != null && depth < 5; depth++)
+            {
+                BasePlayer player = source as BasePlayer;
+                if (player != null)
+                    return player;
 
-            return ownerId.IsSteamId()
-                ? BasePlayer.FindByID(ownerId) ?? BasePlayer.FindSleeping(ownerId)
-                : null;
+                ulong ownerId = source.OwnerID;
+                if (ownerId.IsSteamId())
+                    return BasePlayer.FindByID(ownerId)
+                        ?? BasePlayer.FindSleeping(ownerId);
+
+                BaseEntity parent = source.GetParentEntity();
+                player = parent as BasePlayer;
+                if (player != null)
+                    return player;
+
+                source = source.creatorEntity;
+            }
+
+            return null;
         }
 
         private static bool IsQualifyingRaidStructure(BaseCombatEntity entity)
@@ -2561,6 +2578,18 @@ namespace Oxide.Plugins
                 return helicopter != null && _retiringHelicopters.Contains(helicopter)
                     ? (object)false : null;
 
+            // Damage filtering is the final safety net, but the response should
+            // never deliberately line up a rocket/napalm pass on the property it
+            // was deployed to defend. Rust can independently request a strafe at
+            // the interest-zone origin, which is also the victim-base center.
+            if (IsProtectedVictimStrafePosition(incident, strafePosition))
+            {
+                incident.ApprovedStructureStrafePosition = Vector3.zero;
+                incident.ApprovedStructureStrafeUntil = 0f;
+                _protectedVictimStrafesRejected++;
+                return false;
+            }
+
             ResponseProfile profile = incident.GetCurrentProfile(_config);
             bool approvedPlayerStrafe = strafeTarget != null
                 && IsEligibleTarget(incident, ai, strafeTarget)
@@ -2604,6 +2633,51 @@ namespace Oxide.Plugins
             });
 
             return null;
+        }
+
+        private bool IsProtectedVictimStrafePosition(RaidIncident incident,
+            Vector3 strafePosition)
+        {
+            if (incident == null || strafePosition == Vector3.zero)
+                return false;
+
+            // The selected entity is the center of an administrator test. This
+            // fast check also protects an empty pasted base before every building
+            // piece has been discovered by the localized entity query below.
+            if (incident.IsAdminTest
+                && HorizontalDistanceSquared(strafePosition, incident.Center)
+                    <= 20f * 20f)
+                return true;
+
+            List<BaseCombatEntity> nearby = Facepunch.Pool.Get<List<BaseCombatEntity>>();
+            try
+            {
+                Vis.Entities(strafePosition, 18f, nearby,
+                    Layers.Mask.Construction | Layers.Mask.Deployed,
+                    QueryTriggerInteraction.Ignore);
+                for (int i = 0; i < nearby.Count; i++)
+                {
+                    BaseCombatEntity entity = nearby[i];
+                    if (entity == null || entity.IsDestroyed)
+                        continue;
+
+                    uint buildingId = GetBuildingId(entity);
+                    ulong boatId = GetBoatId(entity);
+                    bool exactProtectedAsset = (buildingId != 0
+                            && incident.ProtectedBuildingIds.Contains(buildingId))
+                        || (boatId != 0UL
+                            && incident.ProtectedBoatIds.Contains(boatId));
+                    if (exactProtectedAsset
+                        && !CanHelicopterDamageAsset(incident, entity))
+                        return true;
+                }
+            }
+            finally
+            {
+                Facepunch.Pool.FreeUnmanaged(ref nearby);
+            }
+
+            return false;
         }
 
         private static void ApplyStrafeLoadout(PatrolHelicopterAI ai,
@@ -2987,9 +3061,10 @@ namespace Oxide.Plugins
         }
 
         private void RecordHelicopterDamageTelemetry(RaidIncident incident,
-            PatrolHelicopter helicopter, float incomingDamage)
+            PatrolHelicopter helicopter, HitInfo info)
         {
-            if (incident == null || helicopter == null || helicopter.IsDestroyed)
+            if (incident == null || helicopter == null || helicopter.IsDestroyed
+                || info == null)
                 return;
 
             HelicopterHealthTelemetry telemetry;
@@ -3003,8 +3078,20 @@ namespace Oxide.Plugins
             // coordinated fight. Aggregate the reported damage here and let the
             // existing one-second maintenance sample observe the live health,
             // avoiding one allocation and one NextTick callback per projectile.
+            float incomingDamage = Mathf.Max(0f, info.damageTypes.Total());
+            float bulletDamage = Mathf.Max(0f,
+                info.damageTypes.Get(DamageType.Bullet));
+            float explosionDamage = Mathf.Max(0f,
+                info.damageTypes.Get(DamageType.Explosion));
+            float heatDamage = Mathf.Max(0f,
+                info.damageTypes.Get(DamageType.Heat));
             telemetry.HitCount++;
             telemetry.ReportedIncomingDamage += incomingDamage;
+            telemetry.ReportedBulletDamage += bulletDamage;
+            telemetry.ReportedExplosionDamage += explosionDamage;
+            telemetry.ReportedHeatDamage += heatDamage;
+            telemetry.ReportedOtherDamage += Mathf.Max(0f, incomingDamage
+                - bulletDamage - explosionDamage - heatDamage);
         }
 
         private void ObserveHelicopterHealth(RaidIncident incident,
@@ -3458,8 +3545,8 @@ namespace Oxide.Plugins
 
             CuiHelper.DestroyUi(player, HostilityUiName);
             int seconds = Mathf.Max(0, Mathf.CeilToInt(remainingSeconds));
-            string countdown = string.Format("{0}M {1:00}S", seconds / 60,
-                seconds % 60);
+            string countdown = FormatLanguageMessage("UiCountdown",
+                player.UserIDString, seconds / 60, seconds % 60);
             var elements = new CuiElementContainer();
             string panel = elements.Add(new CuiPanel
             {
@@ -3479,7 +3566,8 @@ namespace Oxide.Plugins
                 RectTransform = { AnchorMin = "0.15 0", AnchorMax = "0.59 1" },
                 Text =
                 {
-                    Text = cleared ? "HOSTILITY CLEARED" : "HELI HOSTILE",
+                    Text = FormatLanguageMessage(cleared ? "UiHostilityCleared"
+                        : "UiHeliHostile", player.UserIDString),
                     FontSize = 11,
                     Align = TextAnchor.MiddleLeft,
                     Color = "1 1 1 1"
@@ -3492,7 +3580,8 @@ namespace Oxide.Plugins
                     RectTransform = { AnchorMin = "0.57 0.50", AnchorMax = "0.72 0.98" },
                     Text =
                     {
-                        Text = "ROUND",
+                        Text = FormatLanguageMessage("UiRound",
+                            player.UserIDString),
                         FontSize = 7,
                         Align = TextAnchor.MiddleCenter,
                         Color = "1 1 1 0.72"
@@ -3516,7 +3605,8 @@ namespace Oxide.Plugins
                 RectTransform = { AnchorMin = "0.70 0", AnchorMax = "0.98 1" },
                 Text =
                 {
-                    Text = cleared ? "SAFE" : countdown,
+                    Text = cleared ? FormatLanguageMessage("UiSafe",
+                        player.UserIDString) : countdown,
                     FontSize = 12,
                     Align = TextAnchor.MiddleCenter,
                     Color = "1 1 1 1"
@@ -3953,8 +4043,51 @@ namespace Oxide.Plugins
             if (arguments != null)
                 fullArguments.AddRange(arguments);
 
-            string message = FormatLanguageMessage(key, null, fullArguments.ToArray());
-            PrintToChat(message);
+            object[] baseArguments = fullArguments.ToArray();
+            for (int i = 0; i < BasePlayer.activePlayerList.Count; i++)
+            {
+                BasePlayer player = BasePlayer.activePlayerList[i];
+                if (player == null || !player.IsConnected)
+                    continue;
+
+                object[] localizedArguments = LocalizeBroadcastArguments(
+                    baseArguments, player.UserIDString);
+                player.ChatMessage(FormatLanguageMessage(key,
+                    player.UserIDString, localizedArguments));
+            }
+        }
+
+        private object[] LocalizeBroadcastArguments(object[] arguments,
+            string userId)
+        {
+            if (arguments == null || arguments.Length < 2
+                || !(arguments[1] is string))
+                return arguments ?? Array.Empty<object>();
+
+            string configuredName = (string)arguments[1];
+            string languageKey = null;
+            switch (configuredName)
+            {
+                case "Round 1 - Suppression":
+                    languageKey = "ResponseRound1";
+                    break;
+                case "Round 2 - Escalation":
+                    languageKey = "ResponseRound2";
+                    break;
+                case "Round 3 - Maximum Response":
+                    languageKey = "ResponseRound3";
+                    break;
+                case "Round 4 - Final Response":
+                    languageKey = "ResponseRound4";
+                    break;
+            }
+
+            if (languageKey == null)
+                return arguments;
+
+            object[] localized = (object[])arguments.Clone();
+            localized[1] = lang.GetMessage(languageKey, this, userId);
+            return localized;
         }
 
         private string FormatLanguageMessage(string key, string userId,
@@ -4328,6 +4461,9 @@ namespace Oxide.Plugins
                 .Append(", unresolved ordnance source ")
                 .Append(_raidProtectionBypassesDeniedUnresolved)
                 .AppendLine();
+            report.Append("Protected victim rocket strafes rejected since load: ")
+                .Append(_protectedVictimStrafesRejected)
+                .AppendLine();
             report.AppendLine("AntiRaidHeli live health status:");
             int liveHelicopters = 0;
 
@@ -4406,6 +4542,18 @@ namespace Oxide.Plugins
                             .Append(", incoming damage ")
                             .Append(telemetry.ReportedIncomingDamage.ToString("0.##",
                                 CultureInfo.InvariantCulture))
+                            .Append(" [bullet ")
+                            .Append(telemetry.ReportedBulletDamage.ToString("0.##",
+                                CultureInfo.InvariantCulture))
+                            .Append(", explosive ")
+                            .Append(telemetry.ReportedExplosionDamage.ToString("0.##",
+                                CultureInfo.InvariantCulture))
+                            .Append(", heat ")
+                            .Append(telemetry.ReportedHeatDamage.ToString("0.##",
+                                CultureInfo.InvariantCulture))
+                            .Append(", other ")
+                            .Append(telemetry.ReportedOtherDamage.ToString("0.##",
+                                CultureInfo.InvariantCulture)).Append(']')
                             .Append(", body loss ")
                             .Append(telemetry.ObservedBodyDamage.ToString("0.##",
                                 CultureInfo.InvariantCulture))
@@ -4620,8 +4768,122 @@ namespace Oxide.Plugins
                 ["MonitoringAlreadyStopped"] = "AntiRaidHeli automatic monitoring was already stopped. Cleaned up {0} active event(s).",
                 ["ManualTestStarted"] = "Started manual AntiRaidHeli response level {0} at {1}.",
                 ["TestTargetRequired"] = "Look directly at a building belonging to the simulated victim base and try again.",
-                ["TestStarted"] = "Started AntiRaidHeli protection test level {0} at {1}. The targeted building is the defended test base; players who damage it and their associated structures become aggressors."
-            }, this);
+                ["TestStarted"] = "Started AntiRaidHeli protection test level {0} at {1}. The targeted building is the defended test base; players who damage it and their associated structures become aggressors.",
+                ["UiHostilityCleared"] = "HOSTILITY CLEARED",
+                ["UiHeliHostile"] = "HELI HOSTILE",
+                ["UiRound"] = "ROUND",
+                ["UiSafe"] = "SAFE",
+                ["UiCountdown"] = "{0}M {1:00}S",
+                ["ResponseRound1"] = "Round 1 - Suppression",
+                ["ResponseRound2"] = "Round 2 - Escalation",
+                ["ResponseRound3"] = "Round 3 - Maximum Response",
+                ["ResponseRound4"] = "Round 4 - Final Response"
+            }, this, "en");
+
+            lang.RegisterMessages(new Dictionary<string, string>
+            {
+                ["InitialAlert"] = "<color=#ffb347><b>Alerte de raid :</b></color> Un hélicoptère anti-raid se dirige vers un raid actif en <color=#ffd479>{0}</color>. Intervention : <color=#ffffff>{1}</color>. La zone dangereuse est indiquée sur la carte.",
+                ["EscalationAlert"] = "<color=#ff6b35><b>Alerte de raid :</b></color> L’hélicoptère en <color=#ffd479>{0}</color> a été détruit. <color=#ffffff>{1}</color> est en attente et sera déployée dès que les dégâts aux structures reprendront.",
+                ["EscalationStandby"] = "<color=#ff6b35><b>Alerte de raid :</b></color> L’hélicoptère en <color=#ffd479>{0}</color> a été détruit. <color=#ffffff>{1}</color> sera déployée dans quelques secondes.",
+                ["EscalationDeployed"] = "<color=#ff6b35><b>Alerte de raid :</b></color> Le raid a repris en <color=#ffd479>{0}</color>. <color=#ffffff>{1}</color> a été déployée.",
+                ["ResponseResumed"] = "<color=#ffb347><b>Alerte de raid :</b></color> Le raid a repris en <color=#ffd479>{0}</color>. L’intervention suspendue <color=#ffffff>{1}</color> revient.",
+                ["FinalDefeated"] = "<color=#8cff98><b>Alerte de raid :</b></color> Le dernier hélicoptère anti-raid en <color=#ffd479>{0}</color> a été détruit. Vous pouvez maintenant terminer le raid en paix — vous l’avez mérité.",
+                ["FinalDefeatedV2"] = "<color=#8cff98><b>Alerte de raid :</b></color> Le dernier hélicoptère anti-raid en <color=#ffd479>{0}</color> a été détruit. Vous pouvez maintenant terminer le raid en paix — vous l’avez mérité.",
+                ["AllClear"] = "<color=#8cff98><b>Fin de l’alerte de raid :</b></color> La zone dangereuse de l’hélicoptère anti-raid en <color=#ffd479>{0}</color> n’est plus active.",
+                ["HostilityThreeMinutes"] = "<color=#ff6b35><b>Hélicoptère anti-raid :</b></color> Vous êtes considéré comme hostile. Cessez toute action hostile pendant <color=#ffffff>3 minutes</color> pour vous rendre.",
+                ["HostilityTwoMinutes"] = "<color=#ffb347><b>Hélicoptère anti-raid :</b></color> Votre hostilité prendra fin dans <color=#ffffff>2 minutes</color>. Toute action hostile réinitialise le minuteur.",
+                ["HostilityOneMinute"] = "<color=#ffd479><b>Hélicoptère anti-raid :</b></color> Votre hostilité prendra fin dans <color=#ffffff>1 minute</color>. Toute action hostile réinitialise le minuteur.",
+                ["HostilityExpired"] = "<color=#8cff98><b>Hélicoptère anti-raid :</b></color> Vous n’êtes plus considéré comme hostile. Désarmez-vous, déshabillez-vous et partez avant que l’hélicoptère ne change d’avis.",
+                ["RepairLocked"] = "<color=#ff6b35><b>Hélicoptère anti-raid :</b></color> Cette structure d’agresseur ne peut pas être réparée, améliorée ou agrandie tant que l’intervention est active.",
+                ["NoPermission"] = "Vous n’avez pas la permission d’utiliser cette commande.",
+                ["MonitoringStarted"] = "La surveillance automatique d’AntiRaidHeli est active et le restera après les rechargements et redémarrages.",
+                ["MonitoringAlreadyRunning"] = "La surveillance automatique d’AntiRaidHeli est déjà active.",
+                ["CannotStartDisabledMode"] = "AntiRaidHeli ne peut pas démarrer car le mode de couverture des raids est désactivé. Choisissez AllRaids ou OfflineRaidsOnly dans la configuration. Les tests administrateur restent disponibles.",
+                ["MonitoringStopped"] = "La surveillance automatique d’AntiRaidHeli est arrêtée. {0} événement(s) actif(s) ont été nettoyés.",
+                ["MonitoringAlreadyStopped"] = "La surveillance automatique d’AntiRaidHeli était déjà arrêtée. {0} événement(s) actif(s) ont été nettoyés.",
+                ["ManualTestStarted"] = "Intervention AntiRaidHeli de niveau {0} démarrée en {1}.",
+                ["TestTargetRequired"] = "Regardez directement un bâtiment appartenant à la base victime simulée, puis réessayez.",
+                ["TestStarted"] = "Test de protection AntiRaidHeli de niveau {0} démarré en {1}. Le bâtiment ciblé est la base défendue ; les joueurs qui l’endommagent et leurs structures associées deviennent des agresseurs.",
+                ["UiHostilityCleared"] = "HOSTILITÉ LEVÉE",
+                ["UiHeliHostile"] = "CIBLE DE L’HÉLI",
+                ["UiRound"] = "MANCHE",
+                ["UiSafe"] = "SÛR",
+                ["UiCountdown"] = "{0} MIN {1:00} S",
+                ["ResponseRound1"] = "Manche 1 - Suppression",
+                ["ResponseRound2"] = "Manche 2 - Escalade",
+                ["ResponseRound3"] = "Manche 3 - Intervention maximale",
+                ["ResponseRound4"] = "Manche 4 - Intervention finale"
+            }, this, "fr");
+
+            lang.RegisterMessages(new Dictionary<string, string>
+            {
+                ["InitialAlert"] = "<color=#ffb347><b>Тревога рейда:</b></color> Противорейдовый вертолёт направляется к активному рейду в квадрате <color=#ffd479>{0}</color>. Реакция: <color=#ffffff>{1}</color>. Опасная зона отмечена на карте.",
+                ["EscalationAlert"] = "<color=#ff6b35><b>Тревога рейда:</b></color> Вертолёт в квадрате <color=#ffd479>{0}</color> уничтожен. <color=#ffffff>{1}</color> находится в готовности и будет развёрнута после возобновления урона постройкам.",
+                ["EscalationStandby"] = "<color=#ff6b35><b>Тревога рейда:</b></color> Вертолёт в квадрате <color=#ffd479>{0}</color> уничтожен. <color=#ffffff>{1}</color> будет развёрнута через несколько секунд.",
+                ["EscalationDeployed"] = "<color=#ff6b35><b>Тревога рейда:</b></color> Рейд в квадрате <color=#ffd479>{0}</color> возобновился. <color=#ffffff>{1}</color> развёрнута.",
+                ["ResponseResumed"] = "<color=#ffb347><b>Тревога рейда:</b></color> Рейд в квадрате <color=#ffd479>{0}</color> возобновился. Приостановленная реакция <color=#ffffff>{1}</color> возвращается.",
+                ["FinalDefeated"] = "<color=#8cff98><b>Тревога рейда:</b></color> Последний противорейдовый вертолёт в квадрате <color=#ffd479>{0}</color> уничтожен. Теперь вы можете спокойно продолжить рейд — вы это заслужили.",
+                ["FinalDefeatedV2"] = "<color=#8cff98><b>Тревога рейда:</b></color> Последний противорейдовый вертолёт в квадрате <color=#ffd479>{0}</color> уничтожен. Теперь вы можете спокойно продолжить рейд — вы это заслужили.",
+                ["AllClear"] = "<color=#8cff98><b>Тревога рейда снята:</b></color> Опасная зона противорейдового вертолёта в квадрате <color=#ffd479>{0}</color> больше не активна.",
+                ["HostilityThreeMinutes"] = "<color=#ff6b35><b>Противорейдовый вертолёт:</b></color> Вы отмечены как враждебная цель. Прекратите враждебные действия на <color=#ffffff>3 минуты</color>, чтобы сдаться.",
+                ["HostilityTwoMinutes"] = "<color=#ffb347><b>Противорейдовый вертолёт:</b></color> До снятия враждебности осталось <color=#ffffff>2 минуты</color>. Любое враждебное действие сбрасывает таймер.",
+                ["HostilityOneMinute"] = "<color=#ffd479><b>Противорейдовый вертолёт:</b></color> До снятия враждебности осталась <color=#ffffff>1 минута</color>. Любое враждебное действие сбрасывает таймер.",
+                ["HostilityExpired"] = "<color=#8cff98><b>Противорейдовый вертолёт:</b></color> Вы больше не считаетесь враждебной целью. Разоружитесь, снимите экипировку и уходите, пока вертолёт не передумал.",
+                ["RepairLocked"] = "<color=#ff6b35><b>Противорейдовый вертолёт:</b></color> Эту постройку агрессоров нельзя ремонтировать, улучшать или расширять, пока действует цепочка реагирования.",
+                ["NoPermission"] = "У вас нет разрешения на использование этой команды.",
+                ["MonitoringStarted"] = "Автоматический мониторинг AntiRaidHeli запущен и останется активным после перезагрузок плагина и сервера.",
+                ["MonitoringAlreadyRunning"] = "Автоматический мониторинг AntiRaidHeli уже запущен.",
+                ["CannotStartDisabledMode"] = "AntiRaidHeli не может запуститься: режим охвата рейдов отключён. Выберите AllRaids или OfflineRaidsOnly в конфигурации. Администраторские тесты по-прежнему доступны.",
+                ["MonitoringStopped"] = "Автоматический мониторинг AntiRaidHeli остановлен. Очищено активных событий: {0}.",
+                ["MonitoringAlreadyStopped"] = "Автоматический мониторинг AntiRaidHeli уже был остановлен. Очищено активных событий: {0}.",
+                ["ManualTestStarted"] = "Ручная реакция AntiRaidHeli уровня {0} запущена в квадрате {1}.",
+                ["TestTargetRequired"] = "Посмотрите прямо на постройку, принадлежащую имитируемой базе-жертве, и повторите попытку.",
+                ["TestStarted"] = "Тест защиты AntiRaidHeli уровня {0} запущен в квадрате {1}. Выбранная постройка является защищаемой тестовой базой; игроки, наносящие ей урон, и связанные с ними постройки становятся агрессорами.",
+                ["UiHostilityCleared"] = "ВРАЖДЕБНОСТЬ СНЯТА",
+                ["UiHeliHostile"] = "ВРАГ ВЕРТОЛЁТА",
+                ["UiRound"] = "РАУНД",
+                ["UiSafe"] = "БЕЗОПАСНО",
+                ["UiCountdown"] = "{0} М {1:00} С",
+                ["ResponseRound1"] = "Раунд 1 - Подавление",
+                ["ResponseRound2"] = "Раунд 2 - Эскалация",
+                ["ResponseRound3"] = "Раунд 3 - Максимальная реакция",
+                ["ResponseRound4"] = "Раунд 4 - Финальная реакция"
+            }, this, "ru");
+
+            lang.RegisterMessages(new Dictionary<string, string>
+            {
+                ["InitialAlert"] = "<color=#ffb347><b>Тривога рейду:</b></color> Протирейдовий гелікоптер прямує до активного рейду в квадраті <color=#ffd479>{0}</color>. Реакція: <color=#ffffff>{1}</color>. Небезпечну зону позначено на мапі.",
+                ["EscalationAlert"] = "<color=#ff6b35><b>Тривога рейду:</b></color> Гелікоптер у квадраті <color=#ffd479>{0}</color> знищено. <color=#ffffff>{1}</color> перебуває в готовності та буде розгорнута після відновлення пошкодження споруд.",
+                ["EscalationStandby"] = "<color=#ff6b35><b>Тривога рейду:</b></color> Гелікоптер у квадраті <color=#ffd479>{0}</color> знищено. <color=#ffffff>{1}</color> буде розгорнута за кілька секунд.",
+                ["EscalationDeployed"] = "<color=#ff6b35><b>Тривога рейду:</b></color> Рейд у квадраті <color=#ffd479>{0}</color> відновився. <color=#ffffff>{1}</color> розгорнута.",
+                ["ResponseResumed"] = "<color=#ffb347><b>Тривога рейду:</b></color> Рейд у квадраті <color=#ffd479>{0}</color> відновився. Призупинена реакція <color=#ffffff>{1}</color> повертається.",
+                ["FinalDefeated"] = "<color=#8cff98><b>Тривога рейду:</b></color> Останній протирейдовий гелікоптер у квадраті <color=#ffd479>{0}</color> знищено. Тепер ви можете спокійно продовжити рейд — ви це заслужили.",
+                ["FinalDefeatedV2"] = "<color=#8cff98><b>Тривога рейду:</b></color> Останній протирейдовий гелікоптер у квадраті <color=#ffd479>{0}</color> знищено. Тепер ви можете спокійно продовжити рейд — ви це заслужили.",
+                ["AllClear"] = "<color=#8cff98><b>Тривогу рейду скасовано:</b></color> Небезпечна зона протирейдового гелікоптера в квадраті <color=#ffd479>{0}</color> більше не активна.",
+                ["HostilityThreeMinutes"] = "<color=#ff6b35><b>Протирейдовий гелікоптер:</b></color> Вас позначено як ворожу ціль. Припиніть ворожі дії на <color=#ffffff>3 хвилини</color>, щоб здатися.",
+                ["HostilityTwoMinutes"] = "<color=#ffb347><b>Протирейдовий гелікоптер:</b></color> До завершення ворожості залишилося <color=#ffffff>2 хвилини</color>. Будь-яка ворожа дія скидає таймер.",
+                ["HostilityOneMinute"] = "<color=#ffd479><b>Протирейдовий гелікоптер:</b></color> До завершення ворожості залишилася <color=#ffffff>1 хвилина</color>. Будь-яка ворожа дія скидає таймер.",
+                ["HostilityExpired"] = "<color=#8cff98><b>Протирейдовий гелікоптер:</b></color> Ви більше не вважаєтеся ворожою ціллю. Роззбройтеся, зніміть спорядження та йдіть, поки гелікоптер не передумав.",
+                ["RepairLocked"] = "<color=#ff6b35><b>Протирейдовий гелікоптер:</b></color> Цю споруду агресорів не можна ремонтувати, покращувати або розширювати, доки діє ланцюг реагування.",
+                ["NoPermission"] = "У вас немає дозволу на використання цієї команди.",
+                ["MonitoringStarted"] = "Автоматичний моніторинг AntiRaidHeli запущено й він залишатиметься активним після перезавантажень плагіна та сервера.",
+                ["MonitoringAlreadyRunning"] = "Автоматичний моніторинг AntiRaidHeli вже запущено.",
+                ["CannotStartDisabledMode"] = "AntiRaidHeli не може запуститися: режим охоплення рейдів вимкнено. Виберіть AllRaids або OfflineRaidsOnly у конфігурації. Адміністраторські тести залишаються доступними.",
+                ["MonitoringStopped"] = "Автоматичний моніторинг AntiRaidHeli зупинено. Очищено активних подій: {0}.",
+                ["MonitoringAlreadyStopped"] = "Автоматичний моніторинг AntiRaidHeli вже було зупинено. Очищено активних подій: {0}.",
+                ["ManualTestStarted"] = "Ручну реакцію AntiRaidHeli рівня {0} запущено у квадраті {1}.",
+                ["TestTargetRequired"] = "Подивіться безпосередньо на споруду, що належить імітованій базі-жертві, та спробуйте ще раз.",
+                ["TestStarted"] = "Тест захисту AntiRaidHeli рівня {0} запущено у квадраті {1}. Вибрана споруда є захищеною тестовою базою; гравці, які завдають їй шкоди, та пов’язані з ними споруди стають агресорами.",
+                ["UiHostilityCleared"] = "ВОРОЖІСТЬ ЗНЯТО",
+                ["UiHeliHostile"] = "ВОРОГ ГЕЛІКОПТЕРА",
+                ["UiRound"] = "РАУНД",
+                ["UiSafe"] = "БЕЗПЕЧНО",
+                ["UiCountdown"] = "{0} ХВ {1:00} С",
+                ["ResponseRound1"] = "Раунд 1 - Придушення",
+                ["ResponseRound2"] = "Раунд 2 - Ескалація",
+                ["ResponseRound3"] = "Раунд 3 - Максимальна реакція",
+                ["ResponseRound4"] = "Раунд 4 - Фінальна реакція"
+            }, this, "uk");
         }
 
         #endregion
@@ -6404,6 +6666,10 @@ namespace Oxide.Plugins
             public float MaximumTailRotor;
             public int HitCount;
             public float ReportedIncomingDamage;
+            public float ReportedBulletDamage;
+            public float ReportedExplosionDamage;
+            public float ReportedHeatDamage;
+            public float ReportedOtherDamage;
             public float ObservedBodyDamage;
             public float ObservedRotorDamage;
             public bool WasDying;
